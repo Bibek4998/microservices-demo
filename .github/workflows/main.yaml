@@ -72,37 +72,3 @@ jobs:
             echo "${img}" >> /tmp/built-images.txt
             echo "${svc_name}:${img}" >> /tmp/svc-to-img.txt
           done
-
-          # write outputs in the new recommended way
-          echo "svc_to_img=$(paste -sd',' /tmp/svc-to-img.txt)" >> "$GITHUB_OUTPUT"
-          echo "images=$(paste -sd',' /tmp/built-images.txt)" >> "$GITHUB_OUTPUT"
-
-      - name: "Prepare manifests: replace image references with built local tags"
-        if: ${{ steps.build_and_load.outputs.svc_to_img != '' }}
-        run: |
-          #!/bin/bash
-          set -euxo pipefail
-
-          echo "svc->img mapping: ${{ steps.build_and_load.outputs.svc_to_img }}"
-          IFS=',' read -r -a pairs <<< "${{ steps.build_and_load.outputs.svc_to_img }}"
-          mkdir -p /tmp/k8s-manifests
-          if [ -d deploy/kubernetes ]; then
-            cp -R deploy/kubernetes/* /tmp/k8s-manifests/ || true
-          else
-            echo "No deploy/kubernetes directory present — skipping"
-            exit 0
-          fi
-
-          for p in "${pairs[@]}"; do
-            svc_name="${p%%:*}"
-            img="${p#*:}"
-            echo "Replacing image for service: ${svc_name} -> ${img}"
-            find /tmp/k8s-manifests -type f \( -name "*.yml" -o -name "*.yaml" \) | while read -r f; do
-              if grep -qE "image:.*${svc_name}" "$f"; then
-                sed -i -E "s|(image:\s*).*${svc_name}.*|\1${img}|g" "$f"
-              fi
-            done
-          done
-
-          echo "Modified manifests:"
-          find /tmp/k8s-manifests -type f -maxdepth 2 -print
