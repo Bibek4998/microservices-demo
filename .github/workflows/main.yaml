@@ -1,103 +1,141 @@
-name: ci
+name: CI — build images & deploy to kind (no registry)
 
 on:
+  pull_request:
+    branches: [ main, develop ]
   push:
-    branches:
-    - "*"  # run for branches
-    tags:
-    - "*"  # run for tags
+    branches: [ main ]
+
+env:
+  KIND_CLUSTER_NAME: capstone
+  KIND_NODE_IMAGE: kindest/node:v1.29.0
+  K8S_NAMESPACE: sock-shop
+  WAIT_TIMEOUT: 15m
 
 jobs:
-  #
-  #
-  #check complete demo is in sync with individual manifest, it should block fom merge. Should this be a diferent file?
-  complete-demo-sync-check:
+  build-and-deploy:
     runs-on: ubuntu-latest
-    env:
-      COMPLETE_DEMO_ARGS: --rm -v ${{ github.workspace }}:/workdir
-      COMPLETE_DEMO_DIR: 'deploy/kubernetes/'
-      COMPLETE_DEMO_IMAGE: 'manifests-image'
+    timeout-minutes: 45
+
     steps:
-    - uses: actions/checkout@v2
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-    #
-    #
-    # Build image
-    - name: Build image
-      env:
-        DOCKER_BUILDKIT: 1
-      run: docker build -t $COMPLETE_DEMO_IMAGE $COMPLETE_DEMO_DIR
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v2
 
-    #
-    #
-    # Check that manifest and complete-demo.yaml ahve the same content
-    - name: check comeplte-demo.yaml content sync
-      run: docker run $COMPLETE_DEMO_ARGS $COMPLETE_DEMO_IMAGE make -C $COMPLETE_DEMO_DIR check-complete-demo
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v2
 
-  #
-  #
-  #check that we can deploy complete-demo
-  #NOTE: what about docker compose? maybe doesn't make sense if we use the KIND action
-  #NOTE: later we can test that the documentation is tested, as in previous cronjobs in travis
-  deployments-tests:
-    needs: complete-demo-sync-check
-    runs-on: ubuntu-latest
-    env:
-      kind-version: 'v0.10.0'
-      kind-image: 'kindest/node:v1.20.0'
-    timeout-minutes: 10
-    steps:
-    - uses: actions/checkout@v2
-    - name: Start KinD
-      uses: engineerd/setup-kind@v0.5.0
-      with:
-        version: ${{ env.kind-version }}
-        image: ${{ env.kind-image }}
-    - name: Wait cluster to start
-      run: |
-        until [ "$(kubectl get pods -A --no-headers | grep -cEv '([0-9]+)/\1')" -eq 0 ]; do
-            sleep 5s
-        done
-        kubectl get pod -A
-    - name: Run and test Complete demo
-      run: |
-        kubectl apply -f deploy/kubernetes/complete-demo.yaml
-        until [ "$(kubectl get pods -n sock-shop --no-headers | grep -cEv '([0-9]+)/\1')" -eq 0 ]; do
-            sleep 5s
-            kubectl get pods -n sock-shop
-            kubectl describe node | grep "Allocated resources" -A 10
-        done
-        kubectl get pod -A
+      - name: Start KinD cluster
+        uses: engineerd/setup-kind@v0.5.0
+        with:
+          version: v0.20.0
+          image: ${{ env.KIND_NODE_IMAGE }}
 
-  #
-  #
-  #build openapi and healtcheck images
-  build-test-images:
-    if: startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/master'
-    runs-on: ubuntu-latest
-    env:
-      GROUP: weaveworksdemos 
-    strategy:
-      matrix:
-        repo: ["openapi", "healthcheck"]
-    steps:
-    - uses: actions/checkout@v2
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: '1.29.0'
 
-    #
-    #
-    # Push to dockerhub
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v1
-    
-    - name: Login to DockerHub
-      uses: docker/login-action@v1
-      with:
-        username: ${{ secrets.DOCKER_USER }}
-        password: ${{ secrets.DOCKER_PASS }}
+      - name: Discover & build Dockerfile services, tag & load into kind
+        id: build_and_load
+        run: |
+          set -euxo pipefail
+          OWNER=${{ github.repository_owner }}
+          SHA=${{ github.sha }}
 
-    - name: Build and push
-      uses: docker/build-push-action@v2
-      with:
-        context: ${{ matrix.repo }}
-        push: true
-        tags: ${{ env.GROUP }}/${{ matrix.repo }}:${{ github.sha }}
+          # find directories containing Dockerfile (skip build system dirs)
+          mapfile -t services < <(find . -maxdepth 2 -type f -name Dockerfile -printf '%h\n' | sed 's|^\./||' | sort -u)
+
+          if [ ${#services[@]} -eq 0 ]; then
+            echo "no services found with Dockerfile"
+            echo "::set-output name=services::"
+            exit 0
+          fi
+
+          echo "services found: ${services[*]}"
+          i=0
+          for svc in "${services[@]}"; do
+            # sanitize service name for manifest replacement (slash -> dash)
+            svc_name="${svc//\//-}"
+            img="local/${OWNER}/${svc_name}:${SHA}"
+            echo "building ${svc} -> ${img}"
+            docker build -f "${svc}/Dockerfile" -t "${img}" "${svc}"
+            echo "loading ${img} into kind"
+            kind load docker-image "${img}" --name "${KIND_CLUSTER_NAME}"
+            echo "${img}" >> /tmp/built-images.txt
+            echo "${svc_name}:${img}" >> /tmp/svc-to-img.txt
+            i=$((i+1))
+          done
+
+          # expose results to next steps
+          echo "::set-output name=svc_to_img::$(cat /tmp/svc-to-img.txt | paste -sd',' -)"
+          echo "::set-output name=images::$(cat /tmp/built-images.txt | paste -sd',' -)"
+
+      - name: Prepare manifests: replace image references with built local tags
+        if: steps.build_and_load.outputs.svc_to_img != ''
+        run: |
+          set -euxo pipefail
+          echo "svc->img mapping: ${{ steps.build_and_load.outputs.svc_to_img }}"
+          IFS=',' read -r -a pairs <<< "${{ steps.build_and_load.outputs.svc_to_img }}"
+          # Make a backup copy of manifests to avoid damaging repository files (work in tmp dir)
+          mkdir -p /tmp/k8s-manifests
+          cp -R deploy/kubernetes/* /tmp/k8s-manifests/ || true
+
+          for p in "${pairs[@]}"; do
+            svc_name="${p%%:*}"
+            img="${p#*:}"
+            echo "Replacing images for service token: ${svc_name} -> ${img}"
+            # Replace any image line mentioning the service name (heuristic)
+            # This will replace images like: image: something/service or image: service
+            # Use sed to find lines with svc_name and replace whole line with 'image: <img>'
+            # Apply to all manifests under /tmp/k8s-manifests
+            grep -RIl --exclude-dir=.git "${svc_name}" /tmp/k8s-manifests || true
+            # conservative replace: only lines containing 'image:' and svc_name
+            find /tmp/k8s-manifests -type f -name '*.yaml' -o -name '*.yml' | while read -r f; do
+              if grep -qE "image:.*${svc_name}" "$f"; then
+                # replace the image value
+                sed -i -E "s|(image:\\s*).*${svc_name}[^[:space:]]*|\\1${img}|g" "$f"
+              fi
+            done
+          done
+
+          echo "Manifests modified in /tmp/k8s-manifests. Listing:"
+          find /tmp/k8s-manifests -type f -maxdepth 2 -print -exec sed -n '1,120p' {} \;
+
+      - name: Apply modified manifests to kind
+        run: |
+          set -euxo pipefail
+          # create namespace if needed
+          kubectl create ns ${K8S_NAMESPACE} || true
+          kubectl apply -R -f /tmp/k8s-manifests || true
+
+      - name: Wait for pods Ready
+        run: |
+          set -euxo pipefail
+          kubectl -n ${K8S_NAMESPACE} get pods -o wide || true
+          kubectl -n ${K8S_NAMESPACE} wait --for=condition=Ready pod --all --timeout=${WAIT_TIMEOUT}
+
+      - name: Smoke test via port-forward
+        run: |
+          set -euxo pipefail
+          # try to port-forward front-end or any pod to test http
+          POD=$(kubectl -n ${K8S_NAMESPACE} get pods -o jsonpath='{.items[0].metadata.name}')
+          kubectl -n ${K8S_NAMESPACE} port-forward "$POD" 8080:8079 >/tmp/portforward.log 2>&1 &
+          PF_PID=$!
+          sleep 5
+          curl -sSfL http://127.0.0.1:8080/ || (cat /tmp/portforward.log; exit 1)
+          kill $PF_PID || true
+
+      - name: Gather cluster info
+        run: |
+          kubectl -n ${K8S_NAMESPACE} get all --show-labels || true
+          kubectl -n ${K8S_NAMESPACE} get events --sort-by='.lastTimestamp' | tail -n 50 || true
+
+      - name: Teardown kind (always)
+        if: always()
+        run: |
+          kind delete cluster --name ${KIND_CLUSTER_NAME} || true
