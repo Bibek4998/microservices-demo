@@ -1,5 +1,4 @@
 name: CI — build images & deploy to kind (no registry)
-
 on:
   pull_request:
     branches: [ main, develop ]
