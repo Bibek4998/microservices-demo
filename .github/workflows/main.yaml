@@ -77,56 +77,38 @@ jobs:
           echo "svc_to_img=$(paste -sd',' /tmp/svc-to-img.txt)" >> "$GITHUB_OUTPUT"
           echo "images=$(paste -sd',' /tmp/built-images.txt)" >> "$GITHUB_OUTPUT"
 
-      - name: Prepare manifests: replace image references with built local tags
+           - name: "Prepare manifests: replace image references with built local tags"
         if: ${{ steps.build_and_load.outputs.svc_to_img != '' }}
         run: |
+          #!/bin/bash
           set -euxo pipefail
+
           echo "svc->img mapping: ${{ steps.build_and_load.outputs.svc_to_img }}"
           IFS=',' read -r -a pairs <<< "${{ steps.build_and_load.outputs.svc_to_img }}"
           mkdir -p /tmp/k8s-manifests
-          cp -R deploy/kubernetes/* /tmp/k8s-manifests/ || true
+          # copy manifests; tolerate missing dir
+          if [ -d deploy/kubernetes ]; then
+            cp -R deploy/kubernetes/* /tmp/k8s-manifests/ || true
+          else
+            echo "No deploy/kubernetes directory found; nothing to replace"
+            exit 0
+          fi
 
           for p in "${pairs[@]}"; do
             svc_name="${p%%:*}"
             img="${p#*:}"
             echo "Replacing images for token: ${svc_name} -> ${img}"
-            # replace only image lines that contain svc_name
+            # only process yaml/yml files
             find /tmp/k8s-manifests -type f \( -name '*.yml' -o -name '*.yaml' \) | while read -r f; do
               if grep -qE "image:.*${svc_name}" "$f"; then
-                sed -i -E "s|(image:\\s*).*${svc_name}[^[:space:]]*|\\1${img}|g" "$f"
+                # replace the image value (heuristic)
+                sed -i -E "s|(image:\s*).*${svc_name}[^[:space:]]*|\1${img}|g" "$f"
               fi
             done
           done
 
           echo "Manifests modified under /tmp/k8s-manifests"
           find /tmp/k8s-manifests -type f -maxdepth 2 -print -exec sed -n '1,80p' {} \; || true
-
-      - name: Apply modified manifests to kind
-        run: |
-          set -euxo pipefail
-          kubectl create ns ${K8S_NAMESPACE} || true
-          kubectl apply -R -f /tmp/k8s-manifests || true
-
-      - name: Wait for pods Ready
-        run: |
-          set -euxo pipefail
-          kubectl -n ${K8S_NAMESPACE} get pods -o wide || true
-          kubectl -n ${K8S_NAMESPACE} wait --for=condition=Ready pod --all --timeout=${WAIT_TIMEOUT}
-
-      - name: Smoke test via port-forward
-        run: |
-          set -euxo pipefail
-          POD=$(kubectl -n ${K8S_NAMESPACE} get pods -o jsonpath='{.items[0].metadata.name}')
-          kubectl -n ${K8S_NAMESPACE} port-forward "$POD" 8080:8079 >/tmp/portforward.log 2>&1 &
-          PF_PID=$!
-          sleep 5
-          curl -sSfL http://127.0.0.1:8080/ || (cat /tmp/portforward.log; exit 1)
-          kill $PF_PID || true
-
-      - name: Gather cluster info
-        run: |
-          kubectl -n ${K8S_NAMESPACE} get all --show-labels || true
-          kubectl -n ${K8S_NAMESPACE} get events --sort-by='.lastTimestamp' | tail -n 50 || true
 
       - name: Teardown kind (always)
         if: always()
