@@ -36,10 +36,11 @@ jobs:
           version: ${{ env.KIND_VERSION }}
           image: ${{ env.KIND_NODE_IMAGE }}
 
-      - name: Install kubectl
-        uses: azure/setup-kubectl@v3
-        with:
-          version: '1.29.0'
+      - name: Install kubectl (manual)
+        run: |
+          curl -LO "https://dl.k8s.io/release/v1.28.0/bin/linux/amd64/kubectl"
+          chmod +x kubectl
+          sudo mv kubectl /usr/local/bin/
 
       - name: Discover & build Dockerfile services, tag & load into kind
         id: build_and_load
