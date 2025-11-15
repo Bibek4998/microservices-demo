@@ -1,4 +1,4 @@
-name: CI — build images & deploy to kind (no registry)
+name: CI - build images & deploy to kind
 
 on:
   pull_request:
@@ -9,6 +9,7 @@ on:
 env:
   KIND_CLUSTER_NAME: capstone
   KIND_NODE_IMAGE: kindest/node:v1.29.0
+  KIND_VERSION: v0.20.0
   K8S_NAMESPACE: sock-shop
   WAIT_TIMEOUT: 15m
 
@@ -32,7 +33,7 @@ jobs:
       - name: Start KinD cluster
         uses: engineerd/setup-kind@v0.5.0
         with:
-          version: v0.20.0
+          version: ${{ env.KIND_VERSION }}
           image: ${{ env.KIND_NODE_IMAGE }}
 
       - name: Install kubectl
@@ -47,7 +48,7 @@ jobs:
           OWNER=${{ github.repository_owner }}
           SHA=${{ github.sha }}
 
-          # find directories containing a Dockerfile (depth 2)
+          # find directories containing a Dockerfile (max depth 2)
           mapfile -t services < <(find . -maxdepth 2 -type f -name Dockerfile -printf '%h\n' | sed 's|^\./||' | sort -u)
 
           if [ ${#services[@]} -eq 0 ]; then
@@ -72,3 +73,9 @@ jobs:
             echo "${img}" >> /tmp/built-images.txt
             echo "${svc_name}:${img}" >> /tmp/svc-to-img.txt
           done
+
+          # expose results as outputs for later steps
+          images="$(tr '\n' ',' < /tmp/built-images.txt | sed 's/,$//')"
+          svc_to_img="$(tr '\n' ',' < /tmp/svc-to-img.txt | sed 's/,$//')"
+          echo "images=${images}" >> "$GITHUB_OUTPUT"
+          echo "svc_to_img=${svc_to_img}" >> "$GITHUB_OUTPUT"
