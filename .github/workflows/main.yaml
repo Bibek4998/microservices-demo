@@ -1,103 +1,102 @@
-name: ci
+name: CI - build images & deploy to kind
 
 on:
+  pull_request:
+    branches: [ main, develop ]
   push:
-    branches:
-    - "*"  # run for branches
-    tags:
-    - "*"  # run for tags
+    branches: [ main ]
+
+env:
+  KIND_CLUSTER_NAME: capstone
+  KIND_NODE_IMAGE: kindest/node:v1.29.0
+  KIND_VERSION: v0.20.0
+  K8S_NAMESPACE: sock-shop
+  WAIT_TIMEOUT: 15m
 
 jobs:
-  #
-  #
-  #check complete demo is in sync with individual manifest, it should block fom merge. Should this be a diferent file?
-  complete-demo-sync-check:
+  build-and-deploy:
     runs-on: ubuntu-latest
-    env:
-      COMPLETE_DEMO_ARGS: --rm -v ${{ github.workspace }}:/workdir
-      COMPLETE_DEMO_DIR: 'deploy/kubernetes/'
-      COMPLETE_DEMO_IMAGE: 'manifests-image'
+    timeout-minutes: 45
+
     steps:
-    - uses: actions/checkout@v2
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-    #
-    #
-    # Build image
-    - name: Build image
-      env:
-        DOCKER_BUILDKIT: 1
-      run: docker build -t $COMPLETE_DEMO_IMAGE $COMPLETE_DEMO_DIR
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v2
 
-    #
-    #
-    # Check that manifest and complete-demo.yaml ahve the same content
-    - name: check comeplte-demo.yaml content sync
-      run: docker run $COMPLETE_DEMO_ARGS $COMPLETE_DEMO_IMAGE make -C $COMPLETE_DEMO_DIR check-complete-demo
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v2
 
-  #
-  #
-  #check that we can deploy complete-demo
-  #NOTE: what about docker compose? maybe doesn't make sense if we use the KIND action
-  #NOTE: later we can test that the documentation is tested, as in previous cronjobs in travis
-  deployments-tests:
-    needs: complete-demo-sync-check
-    runs-on: ubuntu-latest
-    env:
-      kind-version: 'v0.10.0'
-      kind-image: 'kindest/node:v1.20.0'
-    timeout-minutes: 10
-    steps:
-    - uses: actions/checkout@v2
-    - name: Start KinD
-      uses: engineerd/setup-kind@v0.5.0
-      with:
-        version: ${{ env.kind-version }}
-        image: ${{ env.kind-image }}
-    - name: Wait cluster to start
-      run: |
-        until [ "$(kubectl get pods -A --no-headers | grep -cEv '([0-9]+)/\1')" -eq 0 ]; do
-            sleep 5s
-        done
-        kubectl get pod -A
-    - name: Run and test Complete demo
-      run: |
-        kubectl apply -f deploy/kubernetes/complete-demo.yaml
-        until [ "$(kubectl get pods -n sock-shop --no-headers | grep -cEv '([0-9]+)/\1')" -eq 0 ]; do
-            sleep 5s
-            kubectl get pods -n sock-shop
-            kubectl describe node | grep "Allocated resources" -A 10
-        done
-        kubectl get pod -A
+      - name: Start KinD cluster
+        uses: engineerd/setup-kind@v0.5.0
+        with:
+          version: ${{ env.KIND_VERSION }}
+          image: ${{ env.KIND_NODE_IMAGE }}
 
-  #
-  #
-  #build openapi and healtcheck images
-  build-test-images:
-    if: startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/master'
-    runs-on: ubuntu-latest
-    env:
-      GROUP: weaveworksdemos 
-    strategy:
-      matrix:
-        repo: ["openapi", "healthcheck"]
-    steps:
-    - uses: actions/checkout@v2
+      - name: Install kubectl (manual)
+        run: |
+          curl -LO "https://dl.k8s.io/release/v1.28.0/bin/linux/amd64/kubectl"
+          chmod +x kubectl
+          sudo mv kubectl /usr/local/bin/
 
-    #
-    #
-    # Push to dockerhub
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v1
-    
-    - name: Login to DockerHub
-      uses: docker/login-action@v1
-      with:
-        username: ${{ secrets.DOCKER_USER }}
-        password: ${{ secrets.DOCKER_PASS }}
+      - name: Discover & build Dockerfile services, tag & load into kind
+        id: build_and_load
+        run: |
+          set -euxo pipefail
 
-    - name: Build and push
-      uses: docker/build-push-action@v2
-      with:
-        context: ${{ matrix.repo }}
-        push: true
-        tags: ${{ env.GROUP }}/${{ matrix.repo }}:${{ github.sha }}
+          # original owner string (GitHub expands this into the repository owner)
+          OWNER="${{ github.repository_owner }}"
+
+          # If a Docker Hub username secret is provided, prefer that.
+          # Note: ${{ secrets.DOCKER_USERNAME }} expands to empty if not set.
+          if [ -n "${{ secrets.DOCKER_USERNAME }}" ]; then
+            OWNER_LOWER="${{ secrets.DOCKER_USERNAME }}"
+          else
+            # force lowercase to satisfy Docker tag rules
+            OWNER_LOWER="$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')"
+            # fallback explicit override (uncomment if you want to force bibek49)
+            # OWNER_LOWER="bibek49"
+          fi
+
+          SHA=${{ github.sha }}
+
+          # find directories containing a Dockerfile (depth 2)
+          mapfile -t services < <(find . -maxdepth 2 -type f -name Dockerfile -printf '%h\n' | sed 's|^\./||' | sort -u)
+
+          if [ ${#services[@]} -eq 0 ]; then
+            echo "no services found with Dockerfile"
+            echo "svc_to_img=" >> "$GITHUB_OUTPUT"
+            echo "images=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "services found: ${services[*]}"
+          rm -f /tmp/built-images.txt /tmp/svc-to-img.txt || true
+          touch /tmp/built-images.txt /tmp/svc-to-img.txt
+
+          for svc in "${services[@]}"; do
+            svc_name="${svc//\//-}"          # sanitize folder path to token
+            img="local/${OWNER_LOWER}/${svc_name}:${SHA}"
+            echo "building ${svc} -> ${img}"
+            docker build -f "${svc}/Dockerfile" -t "${img}" "${svc}"
+            echo "loading ${img} into kind"
+            kind load docker-image "${img}" --name "${KIND_CLUSTER_NAME}"
+            echo "${img}" >> /tmp/built-images.txt
+            echo "${svc_name}:${img}" >> /tmp/svc-to-img.txt
+          done
+
+          echo "svc_to_img<<EOF" >> "$GITHUB_OUTPUT"
+          cat /tmp/svc-to-img.txt >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+          echo "images<<EOF" >> "$GITHUB_OUTPUT"
+          cat /tmp/built-images.txt >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+          images="$(tr '\n' ',' < /tmp/built-images.txt | sed 's/,$//')"
+          svc_to_img="$(tr '\n' ',' < /tmp/svc-to-img.txt | sed 's/,$//')"
+          echo "images=${images}" >> "$GITHUB_OUTPUT"
+          echo "svc_to_img=${svc_to_img}" >> "$GITHUB_OUTPUT"
