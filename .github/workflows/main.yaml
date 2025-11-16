@@ -95,4 +95,3 @@ jobs:
           images="$(tr '\n' ',' < /tmp/built-images.txt | sed 's/,$//')"
           svc_to_img="$(tr '\n' ',' < /tmp/svc-to-img.txt | sed 's/,$//')"
           echo "images=${images}" >> "$GITHUB_OUTPUT"
-          echo "svc_to_img=${svc_to_img}" >> "$GITHUB_OUTPUT"
