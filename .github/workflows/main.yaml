@@ -1,4 +1,4 @@
-name: CI — build images & deploy to kind (no registry)
+name: CI - build images & deploy to kind
 
 on:
   pull_request:
@@ -9,6 +9,7 @@ on:
 env:
   KIND_CLUSTER_NAME: capstone
   KIND_NODE_IMAGE: kindest/node:v1.29.0
+  KIND_VERSION: v0.20.0
   K8S_NAMESPACE: sock-shop
   WAIT_TIMEOUT: 15m
 
@@ -32,19 +33,30 @@ jobs:
       - name: Start KinD cluster
         uses: engineerd/setup-kind@v0.5.0
         with:
-          version: v0.20.0
+          version: ${{ env.KIND_VERSION }}
           image: ${{ env.KIND_NODE_IMAGE }}
 
-      - name: Install kubectl
-        uses: azure/setup-kubectl@v3
-        with:
-          version: '1.29.0'
+      - name: Install kubectl (manual)
+        run: |
+          curl -LO "https://dl.k8s.io/release/v1.28.0/bin/linux/amd64/kubectl"
+          chmod +x kubectl
+          sudo mv kubectl /usr/local/bin/
 
       - name: Discover & build Dockerfile services, tag & load into kind
         id: build_and_load
         run: |
           set -euxo pipefail
-          OWNER=${{ github.repository_owner }}
+
+          # original owner string (GitHub expands this into the repository owner)
+          OWNER="${{ github.repository_owner }}"
+
+          # force lowercase to satisfy Docker tag rules
+          OWNER_LOWER="$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')"
+
+          # If you prefer to use your Docker Hub username (must be lowercase),
+          # uncomment the next line and set it to your Docker Hub name:
+          # OWNER_LOWER="bibek49"
+
           SHA=${{ github.sha }}
 
           # find directories containing a Dockerfile (depth 2)
@@ -52,7 +64,6 @@ jobs:
 
           if [ ${#services[@]} -eq 0 ]; then
             echo "no services found with Dockerfile"
-            # export empty outputs for later steps
             echo "svc_to_img=" >> "$GITHUB_OUTPUT"
             echo "images=" >> "$GITHUB_OUTPUT"
             exit 0
@@ -64,7 +75,7 @@ jobs:
 
           for svc in "${services[@]}"; do
             svc_name="${svc//\//-}"          # sanitize folder path to token
-            img="local/${OWNER}/${svc_name}:${SHA}"
+            img="local/${OWNER_LOWER}/${svc_name}:${SHA}"
             echo "building ${svc} -> ${img}"
             docker build -f "${svc}/Dockerfile" -t "${img}" "${svc}"
             echo "loading ${img} into kind"
@@ -72,3 +83,16 @@ jobs:
             echo "${img}" >> /tmp/built-images.txt
             echo "${svc_name}:${img}" >> /tmp/svc-to-img.txt
           done
+
+          echo "svc_to_img<<EOF" >> "$GITHUB_OUTPUT"
+          cat /tmp/svc-to-img.txt >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+          echo "images<<EOF" >> "$GITHUB_OUTPUT"
+          cat /tmp/built-images.txt >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+          images="$(tr '\n' ',' < /tmp/built-images.txt | sed 's/,$//')"
+          svc_to_img="$(tr '\n' ',' < /tmp/svc-to-img.txt | sed 's/,$//')"
+          echo "images=${images}" >> "$GITHUB_OUTPUT"
+          echo "svc_to_img=${svc_to_img}" >> "$GITHUB_OUTPUT"
