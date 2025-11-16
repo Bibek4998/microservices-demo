@@ -44,14 +44,17 @@ jobs:
 
       - name: Discover & build Dockerfile services, tag & load into kind
         id: build_and_load
-                run: |
+        run: |
           set -euxo pipefail
+
           # original owner string (GitHub expands this into the repository owner)
           OWNER="${{ github.repository_owner }}"
+
           # force lowercase to satisfy Docker tag rules
           OWNER_LOWER="$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')"
-          # If you prefer to use your Docker Hub username, set it here (must be lowercase)
-          # Uncomment the next line to use your Docker Hub username instead of the GitHub owner
+
+          # If you prefer to use your Docker Hub username (must be lowercase),
+          # uncomment the next line and set it to your Docker Hub name:
           # OWNER_LOWER="bibek49"
 
           SHA=${{ github.sha }}
