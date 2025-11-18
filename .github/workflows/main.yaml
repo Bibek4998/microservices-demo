@@ -1,102 +1,102 @@
-name: CI - build images & deploy to kind
+# name: CI - build images & deploy to kind
 
-on:
-  pull_request:
-    branches: [ main, develop ]
-  push:
-    branches: [ main ]
+# on:
+#   pull_request:
+#     branches: [ main, develop ]
+#   push:
+#     branches: [ main ]
 
-env:
-  KIND_CLUSTER_NAME: capstone
-  KIND_NODE_IMAGE: kindest/node:v1.29.0
-  KIND_VERSION: v0.20.0
-  K8S_NAMESPACE: sock-shop
-  WAIT_TIMEOUT: 15m
+# env:
+#   KIND_CLUSTER_NAME: capstone
+#   KIND_NODE_IMAGE: kindest/node:v1.29.0
+#   KIND_VERSION: v0.20.0
+#   K8S_NAMESPACE: sock-shop
+#   WAIT_TIMEOUT: 15m
 
-jobs:
-  build-and-deploy:
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
+# jobs:
+#   build-and-deploy:
+#     runs-on: ubuntu-latest
+#     timeout-minutes: 45
 
-    steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+#     steps:
+#       - name: Checkout repo
+#         uses: actions/checkout@v4
+#         with:
+#           fetch-depth: 0
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v2
+#       - name: Set up QEMU
+#         uses: docker/setup-qemu-action@v2
 
-      - name: Set up Buildx
-        uses: docker/setup-buildx-action@v2
+#       - name: Set up Buildx
+#         uses: docker/setup-buildx-action@v2
 
-      - name: Start KinD cluster
-        uses: engineerd/setup-kind@v0.5.0
-        with:
-          version: ${{ env.KIND_VERSION }}
-          image: ${{ env.KIND_NODE_IMAGE }}
+#       - name: Start KinD cluster
+#         uses: engineerd/setup-kind@v0.5.0
+#         with:
+#           version: ${{ env.KIND_VERSION }}
+#           image: ${{ env.KIND_NODE_IMAGE }}
 
-      - name: Install kubectl (manual)
-        run: |
-          curl -LO "https://dl.k8s.io/release/v1.28.0/bin/linux/amd64/kubectl"
-          chmod +x kubectl
-          sudo mv kubectl /usr/local/bin/
+#       - name: Install kubectl (manual)
+#         run: |
+#           curl -LO "https://dl.k8s.io/release/v1.28.0/bin/linux/amd64/kubectl"
+#           chmod +x kubectl
+#           sudo mv kubectl /usr/local/bin/
 
-      - name: Discover & build Dockerfile services, tag & load into kind
-        id: build_and_load
-        run: |
-          set -euxo pipefail
+#       - name: Discover & build Dockerfile services, tag & load into kind
+#         id: build_and_load
+#         run: |
+#           set -euxo pipefail
 
-          # original owner string (GitHub expands this into the repository owner)
-          OWNER="${{ github.repository_owner }}"
+#           # original owner string (GitHub expands this into the repository owner)
+#           OWNER="${{ github.repository_owner }}"
 
-          # If a Docker Hub username secret is provided, prefer that.
-          # Note: ${{ secrets.DOCKER_USERNAME }} expands to empty if not set.
-          if [ -n "${{ secrets.DOCKER_USERNAME }}" ]; then
-            OWNER_LOWER="${{ secrets.DOCKER_USERNAME }}"
-          else
-            # force lowercase to satisfy Docker tag rules
-            OWNER_LOWER="$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')"
-            # fallback explicit override (uncomment if you want to force bibek49)
-            # OWNER_LOWER="bibek49"
-          fi
+#           # If a Docker Hub username secret is provided, prefer that.
+#           # Note: ${{ secrets.DOCKER_USERNAME }} expands to empty if not set.
+#           if [ -n "${{ secrets.DOCKER_USERNAME }}" ]; then
+#             OWNER_LOWER="${{ secrets.DOCKER_USERNAME }}"
+#           else
+#             # force lowercase to satisfy Docker tag rules
+#             OWNER_LOWER="$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')"
+#             # fallback explicit override (uncomment if you want to force bibek49)
+#             # OWNER_LOWER="bibek49"
+#           fi
 
-          SHA=${{ github.sha }}
+#           SHA=${{ github.sha }}
 
-          # find directories containing a Dockerfile (depth 2)
-          mapfile -t services < <(find . -maxdepth 2 -type f -name Dockerfile -printf '%h\n' | sed 's|^\./||' | sort -u)
+#           # find directories containing a Dockerfile (depth 2)
+#           mapfile -t services < <(find . -maxdepth 2 -type f -name Dockerfile -printf '%h\n' | sed 's|^\./||' | sort -u)
 
-          if [ ${#services[@]} -eq 0 ]; then
-            echo "no services found with Dockerfile"
-            echo "svc_to_img=" >> "$GITHUB_OUTPUT"
-            echo "images=" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
+#           if [ ${#services[@]} -eq 0 ]; then
+#             echo "no services found with Dockerfile"
+#             echo "svc_to_img=" >> "$GITHUB_OUTPUT"
+#             echo "images=" >> "$GITHUB_OUTPUT"
+#             exit 0
+#           fi
 
-          echo "services found: ${services[*]}"
-          rm -f /tmp/built-images.txt /tmp/svc-to-img.txt || true
-          touch /tmp/built-images.txt /tmp/svc-to-img.txt
+#           echo "services found: ${services[*]}"
+#           rm -f /tmp/built-images.txt /tmp/svc-to-img.txt || true
+#           touch /tmp/built-images.txt /tmp/svc-to-img.txt
 
-          for svc in "${services[@]}"; do
-            svc_name="${svc//\//-}"          # sanitize folder path to token
-            img="local/${OWNER_LOWER}/${svc_name}:${SHA}"
-            echo "building ${svc} -> ${img}"
-            docker build -f "${svc}/Dockerfile" -t "${img}" "${svc}"
-            echo "loading ${img} into kind"
-            kind load docker-image "${img}" --name "${KIND_CLUSTER_NAME}"
-            echo "${img}" >> /tmp/built-images.txt
-            echo "${svc_name}:${img}" >> /tmp/svc-to-img.txt
-          done
+#           for svc in "${services[@]}"; do
+#             svc_name="${svc//\//-}"          # sanitize folder path to token
+#             img="local/${OWNER_LOWER}/${svc_name}:${SHA}"
+#             echo "building ${svc} -> ${img}"
+#             docker build -f "${svc}/Dockerfile" -t "${img}" "${svc}"
+#             echo "loading ${img} into kind"
+#             kind load docker-image "${img}" --name "${KIND_CLUSTER_NAME}"
+#             echo "${img}" >> /tmp/built-images.txt
+#             echo "${svc_name}:${img}" >> /tmp/svc-to-img.txt
+#           done
 
-          echo "svc_to_img<<EOF" >> "$GITHUB_OUTPUT"
-          cat /tmp/svc-to-img.txt >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
+#           echo "svc_to_img<<EOF" >> "$GITHUB_OUTPUT"
+#           cat /tmp/svc-to-img.txt >> "$GITHUB_OUTPUT"
+#           echo "EOF" >> "$GITHUB_OUTPUT"
 
-          echo "images<<EOF" >> "$GITHUB_OUTPUT"
-          cat /tmp/built-images.txt >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
+#           echo "images<<EOF" >> "$GITHUB_OUTPUT"
+#           cat /tmp/built-images.txt >> "$GITHUB_OUTPUT"
+#           echo "EOF" >> "$GITHUB_OUTPUT"
 
-          images="$(tr '\n' ',' < /tmp/built-images.txt | sed 's/,$//')"
-          svc_to_img="$(tr '\n' ',' < /tmp/svc-to-img.txt | sed 's/,$//')"
-          echo "images=${images}" >> "$GITHUB_OUTPUT"
-          echo "svc_to_img=${svc_to_img}" >> "$GITHUB_OUTPUT"
+#           images="$(tr '\n' ',' < /tmp/built-images.txt | sed 's/,$//')"
+#           svc_to_img="$(tr '\n' ',' < /tmp/svc-to-img.txt | sed 's/,$//')"
+#           echo "images=${images}" >> "$GITHUB_OUTPUT"
+#           echo "svc_to_img=${svc_to_img}" >> "$GITHUB_OUTPUT"
