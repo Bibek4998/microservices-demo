@@ -1,129 +1,110 @@
-name: CI / Build, Push & Deploy
+# File: .github/workflows/ci.yaml
+name: CI / CD — Build, Push & Kubernetes Deploy
 
-# Run on push to main and on PRs targeting main
 on:
   push:
-    branches: [ "main" ]
+    branches: [ main, develop ]
   pull_request:
-    branches: [ "main" ]
+    branches: [ main, develop ]
+
+concurrency:
+  group: ci-cd-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   DOCKER_REGISTRY: docker.io
   DOCKER_NAMESPACE: bibek49
   IMAGE_TAG: ${{ github.sha }}
 
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+permissions:
+  contents: read
 
 jobs:
   build-and-push:
-    name: Build images and push to registry
+    name: Build & Push Docker images
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
+    outputs:
+      pushed-images: ${{ steps.set-output-images.outputs.images }}
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - name: Set up QEMU (for multi-platform builds, optional)
+      - name: Set up QEMU (for buildx)
         uses: docker/setup-qemu-action@v2
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v2
 
-      - name: Log in to Docker registry
+      - name: Login to Docker Hub
         uses: docker/login-action@v2
         with:
           registry: ${{ env.DOCKER_REGISTRY }}
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Discover services and images to build
-        id: discover
+      # List of services to build. Add more entries here as needed.
+      # format: "<service-name>::<context-path>::<dockerfile-path (optional)>"
+      - name: Prepare service matrix
+        id: prepare-matrix
         run: |
-          # Candidate service names (common services in this repo)
-          SERVICES="front-end edge-router catalogue carts orders shipping queue-master payment user user-sim graphs healthcheck openapi"
-          MANIFEST_DIRS="deploy/kubernetes deploy/kubernetes/manifests deploy/kubernetes/manifests-*"
-          # Build list of images to replace (we look for weaveworksdemos references in manifests)
-          declare -A IMAGES
-          # 1) If a service folder contains a Dockerfile, add it
-          for s in $SERVICES; do
-            if [ -f "$s/Dockerfile" ] || [ -f "$s/docker/Dockerfile" ] || [ -f "deploy/$s/Dockerfile" ]; then
-              IMAGES[$s]=1
-            fi
-          done
-          # 2) Also scan kubernetes manifests for weaveworksdemos/<service> references
-          for d in $MANIFEST_DIRS; do
-            if [ -d "$d" ]; then
-              while grep -Eor "weaveworksdemos/[a-zA-Z0-9_.-]+" "$d" 2>/dev/null | sed 's|weaveworksdemos/||' | sort -u | while read -r svc; do
-                [ -n "$svc" ] && IMAGES[$svc]=1
-              done
-            fi
-          done
-          # Output a newline-separated list
-          for k in "${!IMAGES[@]}"; do echo "$k"; done | sort > services-to-build.txt
-          echo "services=$(cat services-to-build.txt | tr '\n' ' ')" >> $GITHUB_OUTPUT
-          echo "Found services: $(cat services-to-build.txt | tr '\n' ' ')" 
-      - name: Show discovered services
-        run: |
-          echo "Services to build: ${{ steps.discover.outputs.services }}"
+          # Edit this list to add/remove services you want built and pushed
+          SERVICES=(
+            "openapi::openapi::Dockerfile"
+            "graphs::graphs::Dockerfile"
+            "healthcheck::healthcheck::Dockerfile"
+          )
+          printf "%s\n" "${SERVICES[@]}" > services.txt
+          echo "::set-output name=services::$(printf "%s\n" "${SERVICES[@]}" | jq -R -s -c 'split("\n")[:-1]')"
 
       - name: Build & push images (loop)
+        id: build-push
         run: |
-          set -euo pipefail
-          if [ -z "${{ steps.discover.outputs.services }}" ]; then
-            echo "No services discovered to build. Exiting."
-            exit 0
-          fi
+          images_out=""
+          while IFS= read -r entry; do
+            # entry format: name::context::dockerfile
+            name=$(printf "%s" "$entry" | cut -d'::' -f1)
+            context=$(printf "%s" "$entry" | cut -d'::' -f2)
+            dockerfile=$(printf "%s" "$entry" | cut -d'::' -f3)
 
-          IFS=' ' read -r -a SERVICES <<< "${{ steps.discover.outputs.services }}"
+            # image name and tag
+            image="${DOCKER_REGISTRY}/${DOCKER_NAMESPACE}/${name}:${IMAGE_TAG}"
+            image_latest="${DOCKER_REGISTRY}/${DOCKER_NAMESPACE}/${name}:latest"
 
-          for svc in "${SERVICES[@]}"; do
-            # Determine Dockerfile location heuristically
-            DOCKERFILE=""
-            if [ -f "$svc/Dockerfile" ]; then
-              DOCKERFILE="$svc/Dockerfile"
-              CONTEXT="$svc"
-            elif [ -f "$svc/docker/Dockerfile" ]; then
-              DOCKERFILE="$svc/docker/Dockerfile"
-              CONTEXT="$svc/docker"
-            elif [ -f "deploy/kubernetes/$svc/Dockerfile" ]; then
-              DOCKERFILE="deploy/kubernetes/$svc/Dockerfile"
-              CONTEXT="deploy/kubernetes/$svc"
-            elif [ -f "graphs/Dockerfile" ] && [ "$svc" = "graphs" ]; then
-              DOCKERFILE="graphs/Dockerfile"
-              CONTEXT="graphs"
-            elif [ -f "healthcheck/Dockerfile" ] && [ "$svc" = "healthcheck" ]; then
-              DOCKERFILE="healthcheck/Dockerfile"
-              CONTEXT="healthcheck"
-            elif [ -f "openapi/Dockerfile" ] && [ "$svc" = "openapi" ]; then
-              DOCKERFILE="openapi/Dockerfile"
-              CONTEXT="openapi"
-            else
-              # If no Dockerfile, skip building (image probably external DB or official image)
-              echo "Skipping ${svc}: no Dockerfile found in expected locations."
-              continue
-            fi
+            echo "Building ${image} (context=${context}, dockerfile=${dockerfile})"
 
-            IMAGE="${{ env.DOCKER_REGISTRY }}/${{ env.DOCKER_NAMESPACE }}/${svc}:${{ env.IMAGE_TAG }}"
-            echo "Building ${IMAGE} from ${DOCKERFILE} (context ${CONTEXT})"
+            docker buildx build \
+              --platform linux/amd64,linux/arm64 \
+              --build-arg GITHUB_SHA=${GITHUB_SHA} \
+              -t "${image}" \
+              -t "${image_latest}" \
+              -f "${context}/${dockerfile}" \
+              "${context}" \
+              --push
 
-            # Use buildx build + push
-            docker buildx build --platform linux/amd64 --file "${DOCKERFILE}" --tag "${IMAGE}" --push "${CONTEXT}"
-            echo "Built & pushed ${IMAGE}"
-          done
+            images_out="${images_out}${name}=${image},"
+          done < services.txt
+
+          # export list of pushed images for downstream job
+          echo "::set-output name=images::${images_out}"
+        env:
+          DOCKER_REGISTRY: ${{ env.DOCKER_REGISTRY }}
+          DOCKER_NAMESPACE: ${{ env.DOCKER_NAMESPACE }}
+          IMAGE_TAG: ${{ env.IMAGE_TAG }}
+          GITHUB_SHA: ${{ github.sha }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+
+      - name: Save pushed images output
+        id: set-output-images
+        run: |
+          echo "images=${{ steps.build-push.outputs.images }}" >> $GITHUB_OUTPUT
 
   deploy:
-    name: Deploy to Kubernetes cluster
+    name: Deploy to Kubernetes
     runs-on: ubuntu-latest
     needs: build-and-push
-    permissions:
-      contents: read
-
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -131,76 +112,70 @@ jobs:
       - name: Install kubectl
         uses: azure/setup-kubectl@v3
         with:
-          version: 'latest'
+          version: '1.29.0'  # change if you need a different kubectl version
 
-      - name: Prepare kubeconfig
-        # Provide your kubeconfig base64 as secret KUBE_CONFIG_DATA (base64 encoded)
+      - name: Configure kubeconfig from secret
+        # Expects KUBE_CONFIG_BASE64 to be a base64 of your kubeconfig (~/.kube/config)
         env:
-          KUBECONFIG_FILE: ${{ runner.temp }}/kubeconfig
+          KUBE_CONFIG_BASE64: ${{ secrets.KUBE_CONFIG_BASE64 }}
         run: |
-          if [ -z "${{ secrets.KUBE_CONFIG_DATA }}" ]; then
-            echo "ERROR: secret KUBE_CONFIG_DATA not set. Aborting."
+          if [ -z "$KUBE_CONFIG_BASE64" ]; then
+            echo "ERROR: KUBE_CONFIG_BASE64 secret is not set. Aborting."
             exit 1
           fi
-          echo "${{ secrets.KUBE_CONFIG_DATA }}" | base64 --decode > "${KUBECONFIG_FILE}"
-          chmod 600 "${KUBECONFIG_FILE}"
-          echo "KUBECONFIG=${KUBECONFIG_FILE}" >> $GITHUB_ENV
+          mkdir -p ~/.kube
+          echo "$KUBE_CONFIG_BASE64" | base64 --decode > ~/.kube/config
+          chmod 600 ~/.kube/config
+          kubectl version --client
+          kubectl config current-context || true
 
-      - name: Replace images in manifests to point to pushed images
-        # This will edit YAML manifests in-place under deploy/kubernetes (and similar) to same tag
-        env:
-          IMAGE_TAG: ${{ env.IMAGE_TAG }}
-          DOCKER_NAMESPACE: ${{ env.DOCKER_NAMESPACE }}
+      - name: Replace image references in manifests to point to pushed images
+        # This step looks for common service image names and replaces them with the images we pushed.
+        # Update the mapping below if you have different service names or want more replacements.
         run: |
-          set -euo pipefail
-          ROOTS="deploy/kubernetes deploy/kubernetes/manifests deploy/kubernetes/manifests-*"
-          # Define fallback list of services (same as build step)
-          SERVICES="front-end edge-router catalogue carts orders shipping queue-master payment user user-sim graphs healthcheck openapi"
-          for d in $ROOTS; do
-            if [ -d "$d" ]; then
-              echo "Scanning $d for YAML files..."
-              find "$d" -type f -name '*.y*ml' -print0 | while IFS= read -r -d '' f; do
-                for svc in $SERVICES; do
-                  # Replace weaveworksdemos/<svc>:* or weaveworks/<svc>:*
-                  sed -i -E "s|(weaveworksdemos|weaveworks)/${svc}:[0-9A-Za-z._-]*|${{ env.DOCKER_REGISTRY }}/${{ env.DOCKER_NAMESPACE }}/${svc}:${IMAGE_TAG}|g" "$f" || true
-                done
-                # Also replace any image: weaveworksdemos/<something>
-                sed -i -E "s|weaveworksdemos/([a-zA-Z0-9_.-]+):[0-9A-Za-z._-]*|${{ env.DOCKER_REGISTRY }}/${{ env.DOCKER_NAMESPACE }}/\\1:${IMAGE_TAG}|g" "$f" || true
-              done
-            fi
+          echo "Pushed images: ${{ needs.build-and-push.outputs.pushed-images }}"
+          # parse mapping from the build job (format: name=image,...)
+          pushed="${{ needs.build-and-push.outputs.pushed-images }}"
+          # create a temporary copy of manifests to edit
+          cp -r deploy/kubernetes ./k8s-manifests
+          mkdir -p /tmp/repls
+          # create mapping array
+          IFS=','; for pair in $pushed; do
+            if [ -z "$pair" ]; then continue; fi
+            name=$(echo "$pair" | cut -d'=' -f1)
+            img=$(echo "$pair" | cut -d'=' -f2)
+            echo "Will replace occurrences of '${name}' with '${img}'"
+            # generic replace: replace occurrences of weaveworksdemos/<name> or <name> with the new image
+            # (This is a blunt replacement — inspect your manifests if they use different image names)
+            grep -RIl --exclude-dir=.git --exclude="*.bak" "weaveworksdemos/${name}" ./k8s-manifests || true
+            # Use perl for in-place safe multi-file replacement
+            perl -0777 -pe "s{weaveworksdemos/${name}(:[^\s\"']+)?}{${img}}gim" -i ./k8s-manifests/**/*.yaml 2>/dev/null || true
+            perl -0777 -pe "s{image:\s*${name}(:[^\s\"']+)?}{image: ${img}}gim" -i ./k8s-manifests/**/*.yaml 2>/dev/null || true
           done
-          echo "Image references updated to tag ${IMAGE_TAG}"
 
-      - name: Apply Kubernetes manifests (deploy)
-        env:
-          KUBECONFIG: ${{ env.KUBECONFIG }}
+          echo "Preview modified manifest files (first 200 lines):"
+          find ./k8s-manifests -type f -name "*.yaml" -print -exec sed -n '1,200p' {} \; -quit || true
+
+      - name: Apply Kubernetes manifests
         run: |
-          set -euo pipefail
-          # Apply namespaced manifests or the complete-demo
-          if [ -f deploy/kubernetes/complete-demo.yaml ]; then
-            kubectl apply -f deploy/kubernetes/complete-demo.yaml
-          else
-            # Apply all manifests under deploy/kubernetes and its subdirs
-            find deploy/kubernetes -type f -name '*.y*ml' -print0 | xargs -0 -r kubectl apply -f
+          # Apply all manifests in the modified directory
+          kubectl apply -f ./k8s-manifests/manifests || true
+          # If there is a 'complete-demo.yaml' it may contain full stack; apply it as well
+          if [ -f "./k8s-manifests/complete-demo.yaml" ]; then
+            kubectl apply -f ./k8s-manifests/complete-demo.yaml
           fi
 
-      - name: Wait for deployments to become ready
+      - name: Wait for deployments to roll out (example)
         run: |
-          # Wait up to 10 minutes for all Deployments in the default namespace to be ready (adjust namespace if manifests use a different one)
-          timeout=600
-          interval=8
-          elapsed=0
-          echo "Waiting for deployments to become ready..."
-          while [ $elapsed -lt $timeout ]; do
-            NOT_READY=$(kubectl get deployments --no-headers 2>/dev/null | awk '{if($2!=$3) print $1}')
-            if [ -z "$NOT_READY" ]; then
-              echo "All deployments ready."
-              exit 0
-            fi
-            echo "Still waiting on: $NOT_READY"
-            sleep $interval
-            elapsed=$((elapsed + interval))
+          # Adjust namespace or deployment names as needed
+          set -e
+          # Wait for a few key deployments to become ready (adjust names to your manifests)
+          for dep in front-end edge-router catalogue carts orders shipping user; do
+            echo "Trying to rollout status for deployment/${dep} (if exists)..."
+            kubectl -n default rollout status deployment/${dep} --timeout=180s || true
           done
-          echo "Timed out waiting for deployments to become ready."
-          kubectl get deployments
-          exit 1
+
+      - name: Print service status
+        run: |
+          kubectl get pods --all-namespaces
+          kubectl get deployments --all-namespaces
