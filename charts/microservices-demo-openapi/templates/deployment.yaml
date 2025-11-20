@@ -1,0 +1,22 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: { include "microservices-demo-openapi.fullname" . }
+  labels:
+    app: { include "microservices-demo-openapi.fullname" . }
+spec:
+  replicas: { .Values.replicaCount }
+  selector:
+    matchLabels:
+      app: { include "microservices-demo-openapi.fullname" . }
+  template:
+    metadata:
+      labels:
+        app: { include "microservices-demo-openapi.fullname" . }
+    spec:
+      containers:
+        - name: microservices-demo-openapi
+          image: "{ .Values.image.repository }:{ .Values.image.tag }"
+          imagePullPolicy: { .Values.image.pullPolicy }
+          ports:
+            - containerPort: 3000

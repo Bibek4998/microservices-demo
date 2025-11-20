@@ -1,0 +1,35 @@
+name: CI — Build & Push Service Images (matrix)
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+env:
+  DOCKERHUB_ORG: ${{ secrets.DOCKERHUB_USERNAME }}
+
+jobs:
+  build-matrix:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: ["microservices-demo/openapi"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Build and push image for ${{ matrix.service }}
+        uses: docker/build-push-action@v4
+        with:
+          context: ./${{ matrix.service }}
+          file: ./${{ matrix.service }}/Dockerfile
+          push: true
+          tags: ${{ env.DOCKERHUB_ORG }}/${{ matrix.service | replace('/','-') }}:${{ github.sha }}
+
