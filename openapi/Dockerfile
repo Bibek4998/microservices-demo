@@ -1,5 +1,7 @@
-ENV NODE_ENV=development ENV NODE_PATH=/usr/src/app/node_modules ENV npm_config_unsafe_perm=true WORKDIR /usr/src/app
-
+ENV NODE_ENV=development \
+    NODE_PATH=/usr/src/app/node_modules \
+    npm_config_unsafe_perm=true
+WORKDIR /usr/src/app
 RUN apk update
 && apk add --no-cache git python3 make g++
 && rm -rf /var/cache/apk/*
