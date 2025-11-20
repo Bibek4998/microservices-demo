@@ -1,17 +1,17 @@
-FROM mhart/alpine-node:6.17
+ENV NODE_ENV=development ENV NODE_PATH=/usr/src/app/node_modules ENV npm_config_unsafe_perm=true WORKDIR /usr/src/app
 
-ENV NODE_ENV "development"
-ENV NODE_PATH "/usr/src/app/node_modules"
-
-# Install base dependencies
 RUN apk update
-RUN apk add git python
+&& apk add --no-cache git python3 make g++
+&& rm -rf /var/cache/apk/*
 
-# Prepare app directory
-WORKDIR /usr/src/app
-COPY . /usr/src/app
-RUN npm install
+COPY package.json package-lock.json* ./
+
+RUN rm -rf node_modules /usr/src/app/node_modules/.staging /root/.npm || true
+&& npm cache clean --force
+&& npm ci --prefer-offline --no-audit --progress=false
+
+COPY . .
+
 VOLUME /tmp/specs
 
-# Start the app
 ENTRYPOINT ["/usr/src/app/node_modules/dredd/bin/dredd"]
