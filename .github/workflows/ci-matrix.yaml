@@ -7,7 +7,7 @@ on:
     branches: [ main, develop ]
 
 env:
-  DOCKERHUB_ORG: ${{ secrets.DOCKERHUB_USERNAME }}
+  DOCKERHUB_ORG: ${{ secrets.DOCKER_USERNAME }}
 
 jobs:
   build-matrix:
