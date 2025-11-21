@@ -24,16 +24,16 @@ jobs:
       - name: Discover services
         id: set-services
         run: |
-          services=""
+          services_array=()
           while IFS= read -r df; do
             dir=$(dirname "$df")
             name=$(basename "$dir")
-            services="${services}${name}::${dir}::Dockerfile\n"
+            services_array+=("\"${name}::${dir}::Dockerfile\"")
           done < <(git ls-files '**/Dockerfile' || true)
-          printf "%b" "$services" > discovered_services.txt
+          services_json="[${services_array[*]}]"
           echo "Discovered services:"
-          cat discovered_services.txt
-          echo "services=$(cat discovered_services.txt)" >> $GITHUB_OUTPUT
+          echo "$services_json"
+          echo "services=$services_json" >> $GITHUB_OUTPUT
 
   build:
     name: Build & Push Microservices
@@ -41,7 +41,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        service: ${{ fromJSON('["' + needs.discover-services.outputs.services.replace('\n','","') + '"]') }}
+        service: ${{ fromJSON(needs.discover-services.outputs.services) }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
