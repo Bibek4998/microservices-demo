@@ -17,7 +17,11 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        service: [ "graphs::graphs::Dockerfile", "healthcheck::healthcheck::Dockerfile", "openapi::openapi::Dockerfile" ]
+        service: [
+          "graphs:graphs:Dockerfile",
+          "healthcheck:healthcheck:Dockerfile",
+          "openapi:openapi:Dockerfile"
+        ]
       max-parallel: 3
     steps:
       - name: Checkout repository
@@ -35,9 +39,9 @@ jobs:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build & Push
+      - name: Build & Push Docker Image
         run: |
-          IFS='::' read -r name context dockerfile <<< "${{ matrix.service }}"
+          IFS=':' read -r name context dockerfile <<< "${{ matrix.service }}"
           echo "Service: $name, context: $context, dockerfile: $dockerfile"
 
           IMAGE="${DOCKER_REGISTRY}/${DOCKER_NAMESPACE}/${name}:${IMAGE_TAG}"
@@ -63,17 +67,25 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
-      kind-version: 'v0.17.0'
-      kind-image: 'kindest/node:v1.27.3'
-      KUBECTL_VERSION: 'v1.27.3'
+      kind-version: 'v0.10.0'
+      kind-image: 'kindest/node:v1.20.0'
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up kubectl
-        uses: azure/setup-kubectl@v3
-        with:
-          version: ${{ env.KUBECTL_VERSION }}
+      - name: Install kubectl manually
+        run: |
+          KUBECTL_VERSION=v1.24.0
+          ARCH=$(uname -m)
+          case $ARCH in
+            x86_64) ARCH=amd64 ;;
+            aarch64) ARCH=arm64 ;;
+            *) echo "Unsupported arch: $ARCH"; exit 1 ;;
+          esac
+          curl -LO "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${ARCH}/kubectl"
+          chmod +x kubectl
+          sudo mv kubectl /usr/local/bin/kubectl
+          kubectl version --client --short
 
       - name: Set up KinD cluster
         uses: engineerd/setup-kind@v0.5.0
