@@ -28,16 +28,18 @@ jobs:
           while IFS= read -r df; do
             dir=$(dirname "$df")
             name=$(basename "$dir")
-            services_array+=("\"${name}::${dir}::Dockerfile\"")
+            # Only include real microservices, skip deploy/kubernetes
+            if [[ "$dir" != "deploy/kubernetes" ]]; then
+              services_array+=("\"${name}::${dir}::Dockerfile\"")
+            fi
           done < <(git ls-files '**/Dockerfile' || true)
 
-          # join array with commas, remove trailing comma
+          # convert array to JSON
           services_json=$(printf "%s," "${services_array[@]}")
           services_json="[${services_json%,}]"
 
-          echo "Discovered services JSON:"
-          echo "$services_json"
           echo "services=$services_json" >> $GITHUB_OUTPUT
+          echo "Discovered services JSON: $services_json"
 
   build:
     name: Build & Push Microservices
@@ -46,7 +48,7 @@ jobs:
     strategy:
       matrix:
         service: ${{ fromJSON(needs.discover-services.outputs.services) }}
-      max-parallel: 4
+      max-parallel: 3
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -69,7 +71,7 @@ jobs:
           image="${DOCKER_REGISTRY}/${DOCKER_NAMESPACE}/${name}:${IMAGE_TAG}"
           image_latest="${DOCKER_REGISTRY}/${DOCKER_NAMESPACE}/${name}:latest"
           echo "==== Building ${image} ===="
-          # Ensure we are in repo root
+          # Make sure build context exists
           cd $GITHUB_WORKSPACE
           docker buildx build \
             --platform linux/amd64 \
