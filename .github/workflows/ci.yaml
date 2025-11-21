@@ -66,25 +66,63 @@ jobs:
               --push
           done < discovered_services.txt
 
-  deploy:
-    name: Deploy to Kubernetes
-    runs-on: ubuntu-latest
-    needs: build
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+  .deployments-tests:
+  needs: complete-demo-sync-check
+  runs-on: ubuntu-latest
+  env:
+    kind-version: 'v0.10.0'
+    kind-image: 'kindest/node:v1.20.0'
+  timeout-minutes: 10
+  steps:
+    - uses: actions/checkout@v3
 
-      - name: Install kubectl
-        uses: azure/setup-kubectl@v3
-        with:
-          version: 'latest'
+    - name: Install kubectl
+      uses: azure/setup-kubectl@v3
+      with:
+        version: 'auto'   # or a specific version like 'v1.24.0'
 
-      - name: Restore kubeconfig
-        run: |
-          mkdir -p $HOME/.kube
-          echo "${{ secrets.KUBE_CONFIG_DATA }}" | base64 --decode > $HOME/.kube/config
-          chmod 600 $HOME/.kube/config
+    - name: Start KinD
+      uses: engineerd/setup-kind@v0.5.0
+      with:
+        version: ${{ env.kind-version }}
+        image: ${{ env.kind-image }}
 
-      - name: Apply Kubernetes manifests
-        run: |
-          kubectl apply -R -f deploy/kubernetes/
+    - name: Confirm kubeconfig / cluster
+      run: |
+        echo "KUBECONFIG: $KUBECONFIG"
+        kubectl cluster-info
+        kubectl get nodes -o wide
+
+    - name: Wait cluster to be ready
+      run: |
+        # Wait until all nodes are Ready
+        for i in $(seq 1 40); do
+          not_ready=$(kubectl get nodes --no-headers 2>/dev/null | grep -cv Ready || true)
+          if [ "$not_ready" -eq 0 ]; then
+            echo "All nodes Ready"
+            break
+          fi
+          echo "Waiting for nodes to become Ready ($i/40)..."
+          sleep 5
+        done
+        kubectl get nodes
+
+    - name: Apply complete demo and wait pods
+      run: |
+        kubectl apply -f deploy/kubernetes/complete-demo.yaml
+        NAMESPACE="sock-shop"
+
+        for i in $(seq 1 60); do
+          # Count pods that are not fully ready (READY column not equal to desired)
+          not_ready_count=$(kubectl get pods -n $NAMESPACE --no-headers 2>/dev/null | awk '{print $2}' | grep -cEv '([0-9]+)/\1' || true)
+          if [ "$not_ready_count" -eq 0 ]; then
+            echo "All pods in $NAMESPACE are ready"
+            break
+          fi
+          echo "Pods not ready: $not_ready_count — waiting ($i/60)..."
+          kubectl get pods -n $NAMESPACE --no-headers
+          sleep 10
+        done
+
+        kubectl get pods -n $NAMESPACE -o wide
+
