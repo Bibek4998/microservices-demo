@@ -12,6 +12,7 @@ env:
   IMAGE_TAG: ${{ github.sha }}
 
 jobs:
+
   build:
     name: Build & Push Microservices
     runs-on: ubuntu-latest
@@ -35,7 +36,6 @@ jobs:
         id: discover
         run: |
           services=""
-          # Find all Dockerfiles in subfolders
           while IFS= read -r df; do
             dir=$(dirname "$df")
             name=$(basename "$dir")
@@ -66,63 +66,60 @@ jobs:
               --push
           done < discovered_services.txt
 
-  .deployments-tests:
-  needs: complete-demo-sync-check
-  runs-on: ubuntu-latest
-  env:
-    kind-version: 'v0.10.0'
-    kind-image: 'kindest/node:v1.20.0'
-  timeout-minutes: 10
-  steps:
-    - uses: actions/checkout@v3
+  deployments-tests:
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      kind-version: 'v0.10.0'
+      kind-image: 'kindest/node:v1.20.0'
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v3
 
-    - name: Install kubectl
-      uses: azure/setup-kubectl@v3
-      with:
-        version: 'auto'   # or a specific version like 'v1.24.0'
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'auto'
 
-    - name: Start KinD
-      uses: engineerd/setup-kind@v0.5.0
-      with:
-        version: ${{ env.kind-version }}
-        image: ${{ env.kind-image }}
+      - name: Start KinD
+        uses: engineerd/setup-kind@v0.5.0
+        with:
+          version: ${{ env.kind-version }}
+          image: ${{ env.kind-image }}
 
-    - name: Confirm kubeconfig / cluster
-      run: |
-        echo "KUBECONFIG: $KUBECONFIG"
-        kubectl cluster-info
-        kubectl get nodes -o wide
+      - name: Confirm kubeconfig / cluster
+        run: |
+          echo "KUBECONFIG: $KUBECONFIG"
+          kubectl cluster-info
+          kubectl get nodes -o wide
 
-    - name: Wait cluster to be ready
-      run: |
-        # Wait until all nodes are Ready
-        for i in $(seq 1 40); do
-          not_ready=$(kubectl get nodes --no-headers 2>/dev/null | grep -cv Ready || true)
-          if [ "$not_ready" -eq 0 ]; then
-            echo "All nodes Ready"
-            break
-          fi
-          echo "Waiting for nodes to become Ready ($i/40)..."
-          sleep 5
-        done
-        kubectl get nodes
+      - name: Wait cluster to be ready
+        run: |
+          for i in $(seq 1 40); do
+            not_ready=$(kubectl get nodes --no-headers 2>/dev/null | grep -cv Ready || true)
+            if [ "$not_ready" -eq 0 ]; then
+              echo "All nodes Ready"
+              break
+            fi
+            echo "Waiting for nodes to become Ready ($i/40)..."
+            sleep 5
+          done
+          kubectl get nodes
 
-    - name: Apply complete demo and wait pods
-      run: |
-        kubectl apply -f deploy/kubernetes/complete-demo.yaml
-        NAMESPACE="sock-shop"
+      - name: Apply complete demo and wait pods
+        run: |
+          kubectl apply -f deploy/kubernetes/complete-demo.yaml
+          NAMESPACE="sock-shop"
 
-        for i in $(seq 1 60); do
-          # Count pods that are not fully ready (READY column not equal to desired)
-          not_ready_count=$(kubectl get pods -n $NAMESPACE --no-headers 2>/dev/null | awk '{print $2}' | grep -cEv '([0-9]+)/\1' || true)
-          if [ "$not_ready_count" -eq 0 ]; then
-            echo "All pods in $NAMESPACE are ready"
-            break
-          fi
-          echo "Pods not ready: $not_ready_count — waiting ($i/60)..."
-          kubectl get pods -n $NAMESPACE --no-headers
-          sleep 10
-        done
+          for i in $(seq 1 60); do
+            not_ready_count=$(kubectl get pods -n $NAMESPACE --no-headers 2>/dev/null | awk '{print $2}' | grep -cEv '([0-9]+)/\1' || true)
+            if [ "$not_ready_count" -eq 0 ]; then
+              echo "All pods in $NAMESPACE are ready"
+              break
+            fi
+            echo "Pods not ready: $not_ready_count — waiting ($i/60)..."
+            kubectl get pods -n $NAMESPACE --no-headers
+            sleep 10
+          done
 
-        kubectl get pods -n $NAMESPACE -o wide
-
+          kubectl get pods -n $NAMESPACE -o wide
