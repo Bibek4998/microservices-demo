@@ -12,7 +12,6 @@ env:
   IMAGE_TAG: ${{ github.sha }}
 
 jobs:
-
   build:
     name: Build & Push Microservices
     runs-on: ubuntu-latest
@@ -44,6 +43,8 @@ jobs:
           printf "%b" "$services" > discovered_services.txt
           echo "Discovered services:"
           cat discovered_services.txt
+          # Note: set-output is deprecated; consider:
+          # echo "count=$(wc -l < discovered_services.txt)" >> $GITHUB_OUTPUT
           echo "::set-output name=count::$(wc -l < discovered_services.txt)"
 
       - name: Build & push all images
@@ -67,6 +68,7 @@ jobs:
           done < discovered_services.txt
 
   deployments-tests:
+    name: Deploy & Tests on KinD
     needs: build
     runs-on: ubuntu-latest
     env:
@@ -79,7 +81,7 @@ jobs:
       - name: Install kubectl
         uses: azure/setup-kubectl@v3
         with:
-          version: 'auto'
+          version: '1.20.17'   # <- pin to a concrete version to avoid "auto" resolution errors
 
       - name: Start KinD
         uses: engineerd/setup-kind@v0.5.0
