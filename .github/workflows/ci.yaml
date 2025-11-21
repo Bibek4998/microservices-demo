@@ -68,17 +68,22 @@ jobs:
       - name: Build & Push
         run: |
           IFS='::' read -r name context dockerfile <<< "${{ matrix.service }}"
+          echo "Service: $name, context: $context, dockerfile: $dockerfile"
+
           image="${DOCKER_REGISTRY}/${DOCKER_NAMESPACE}/${name}:${IMAGE_TAG}"
           image_latest="${DOCKER_REGISTRY}/${DOCKER_NAMESPACE}/${name}:latest"
+
+          # Use absolute paths for build context and Dockerfile
+          CONTEXT_PATH="${GITHUB_WORKSPACE}/${context}"
+          DOCKERFILE_PATH="${CONTEXT_PATH}/${dockerfile}"
+
           echo "==== Building ${image} ===="
-          # Make sure build context exists
-          cd $GITHUB_WORKSPACE
           docker buildx build \
             --platform linux/amd64 \
             -t "${image}" \
             -t "${image_latest}" \
-            -f "${context}/${dockerfile}" \
-            "${context}" \
+            -f "${DOCKERFILE_PATH}" \
+            "${CONTEXT_PATH}" \
             --push \
             --load
         shell: bash
