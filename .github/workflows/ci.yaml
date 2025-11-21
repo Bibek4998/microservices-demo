@@ -30,8 +30,12 @@ jobs:
             name=$(basename "$dir")
             services_array+=("\"${name}::${dir}::Dockerfile\"")
           done < <(git ls-files '**/Dockerfile' || true)
-          services_json="[${services_array[*]}]"
-          echo "Discovered services:"
+
+          # join array with commas, remove trailing comma
+          services_json=$(printf "%s," "${services_array[@]}")
+          services_json="[${services_json%,}]"
+
+          echo "Discovered services JSON:"
           echo "$services_json"
           echo "services=$services_json" >> $GITHUB_OUTPUT
 
@@ -42,6 +46,7 @@ jobs:
     strategy:
       matrix:
         service: ${{ fromJSON(needs.discover-services.outputs.services) }}
+      max-parallel: 4
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
