@@ -69,6 +69,8 @@ jobs:
           image="${DOCKER_REGISTRY}/${DOCKER_NAMESPACE}/${name}:${IMAGE_TAG}"
           image_latest="${DOCKER_REGISTRY}/${DOCKER_NAMESPACE}/${name}:latest"
           echo "==== Building ${image} ===="
+          # Ensure we are in repo root
+          cd $GITHUB_WORKSPACE
           docker buildx build \
             --platform linux/amd64 \
             -t "${image}" \
