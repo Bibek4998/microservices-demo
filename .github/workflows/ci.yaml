@@ -12,14 +12,41 @@ env:
   IMAGE_TAG: ${{ github.sha }}
 
 jobs:
-  build:
-    name: Build & Push Microservices
+  discover-services:
+    name: Discover Microservices
     runs-on: ubuntu-latest
+    outputs:
+      services: ${{ steps.set-services.outputs.services }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up QEMU (for multi-arch)
+      - name: Discover services
+        id: set-services
+        run: |
+          services=""
+          while IFS= read -r df; do
+            dir=$(dirname "$df")
+            name=$(basename "$dir")
+            services="${services}${name}::${dir}::Dockerfile\n"
+          done < <(git ls-files '**/Dockerfile' || true)
+          printf "%b" "$services" > discovered_services.txt
+          echo "Discovered services:"
+          cat discovered_services.txt
+          echo "services=$(cat discovered_services.txt)" >> $GITHUB_OUTPUT
+
+  build:
+    name: Build & Push Microservices
+    needs: discover-services
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: ${{ fromJSON('["' + needs.discover-services.outputs.services.replace('\n','","') + '"]') }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
         uses: docker/setup-qemu-action@v2
 
       - name: Set up Docker Buildx
@@ -31,97 +58,57 @@ jobs:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Discover services
-        id: discover
+      - name: Build & Push
         run: |
-          services=""
-          while IFS= read -r df; do
-            dir=$(dirname "$df")
-            name=$(basename "$dir")
-            services="${services}${name}::${dir}::Dockerfile\n"
-          done < <(git ls-files '**/Dockerfile' || true)
-          printf "%b" "$services" > discovered_services.txt
-          echo "Discovered services:"
-          cat discovered_services.txt
-          # Note: set-output is deprecated; consider:
-          # echo "count=$(wc -l < discovered_services.txt)" >> $GITHUB_OUTPUT
-          echo "::set-output name=count::$(wc -l < discovered_services.txt)"
+          IFS='::' read -r name context dockerfile <<< "${{ matrix.service }}"
+          image="${DOCKER_REGISTRY}/${DOCKER_NAMESPACE}/${name}:${IMAGE_TAG}"
+          image_latest="${DOCKER_REGISTRY}/${DOCKER_NAMESPACE}/${name}:latest"
+          echo "==== Building ${image} ===="
+          docker buildx build \
+            --platform linux/amd64 \
+            -t "${image}" \
+            -t "${image_latest}" \
+            -f "${context}/${dockerfile}" \
+            "${context}" \
+            --push \
+            --load
+        shell: bash
 
-      - name: Build & push all images
-        run: |
-          set -euo pipefail
-          while IFS= read -r entry || [ -n "$entry" ]; do
-            name=$(awk -F'::' '{print $1}' <<< "$entry")
-            context=$(awk -F'::' '{print $2}' <<< "$entry")
-            dockerfile=$(awk -F'::' '{print $3}' <<< "$entry")
-            image="${DOCKER_REGISTRY}/${DOCKER_NAMESPACE}/${name}:${IMAGE_TAG}"
-            image_latest="${DOCKER_REGISTRY}/${DOCKER_NAMESPACE}/${name}:latest"
-
-            echo "==== Building ${image} (context=${context}, dockerfile=${dockerfile}) ===="
-            docker buildx build \
-              --platform linux/amd64,linux/arm64 \
-              -t "${image}" \
-              -t "${image_latest}" \
-              -f "${context}/${dockerfile}" \
-              "${context}" \
-              --push
-          done < discovered_services.txt
-
-  deployments-tests:
-    name: Deploy & Tests on KinD
+  deploy-test-kind:
+    name: Deploy & Test on KinD
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     env:
       kind-version: 'v0.10.0'
       kind-image: 'kindest/node:v1.20.0'
-    timeout-minutes: 10
+      KUBECTL_VERSION: 'v1.20.17'
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - name: Install kubectl
+      - name: Set up kubectl
         uses: azure/setup-kubectl@v3
         with:
-          version: '1.20.17'   # <- pin to a concrete version to avoid "auto" resolution errors
+          version: ${{ env.KUBECTL_VERSION }}
 
-      - name: Start KinD
+      - name: Set up KinD cluster
         uses: engineerd/setup-kind@v0.5.0
         with:
           version: ${{ env.kind-version }}
           image: ${{ env.kind-image }}
 
-      - name: Confirm kubeconfig / cluster
+      - name: Confirm cluster
         run: |
-          echo "KUBECONFIG: $KUBECONFIG"
           kubectl cluster-info
           kubectl get nodes -o wide
 
-      - name: Wait cluster to be ready
-        run: |
-          for i in $(seq 1 40); do
-            not_ready=$(kubectl get nodes --no-headers 2>/dev/null | grep -cv Ready || true)
-            if [ "$not_ready" -eq 0 ]; then
-              echo "All nodes Ready"
-              break
-            fi
-            echo "Waiting for nodes to become Ready ($i/40)..."
-            sleep 5
-          done
-          kubectl get nodes
-
-      - name: Apply complete demo and wait pods
+      - name: Deploy complete demo
         run: |
           kubectl apply -f deploy/kubernetes/complete-demo.yaml
+
+      - name: Wait for all pods ready
+        run: |
           NAMESPACE="sock-shop"
-
-          for i in $(seq 1 60); do
-            not_ready_count=$(kubectl get pods -n $NAMESPACE --no-headers 2>/dev/null | awk '{print $2}' | grep -cEv '([0-9]+)/\1' || true)
-            if [ "$not_ready_count" -eq 0 ]; then
-              echo "All pods in $NAMESPACE are ready"
-              break
-            fi
-            echo "Pods not ready: $not_ready_count — waiting ($i/60)..."
-            kubectl get pods -n $NAMESPACE --no-headers
-            sleep 10
-          done
-
+          kubectl wait --for=condition=Ready pods --all -n $NAMESPACE --timeout=5m
           kubectl get pods -n $NAMESPACE -o wide
