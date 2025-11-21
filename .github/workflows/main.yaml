@@ -17,13 +17,13 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        service: [ "graphs::graphs::Dockerfile", "healthcheck::healthcheck::Dockerfile", "openapi::openapi::Dockerfile" ]
+        service: [ "graphs:graphs:Dockerfile", "healthcheck:healthcheck:Dockerfile", "openapi:openapi:Dockerfile" ]
       max-parallel: 3
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up QEMU
+      - name: Set up QEMU (for multi-arch)
         uses: docker/setup-qemu-action@v2
 
       - name: Set up Docker Buildx
@@ -35,10 +35,12 @@ jobs:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build & Push
+      - name: Build & Push Docker Image
         run: |
-          IFS='::' read -r name context dockerfile <<< "${{ matrix.service }}"
-          echo "Service: $name, context: $context, dockerfile: $dockerfile"
+          IFS=':' read -r name context dockerfile <<< "${{ matrix.service }}"
+          echo "Service: $name"
+          echo "Context: $context"
+          echo "Dockerfile: $dockerfile"
 
           IMAGE="${DOCKER_REGISTRY}/${DOCKER_NAMESPACE}/${name}:${IMAGE_TAG}"
           IMAGE_LATEST="${DOCKER_REGISTRY}/${DOCKER_NAMESPACE}/${name}:latest"
@@ -93,5 +95,5 @@ jobs:
       - name: Wait for all pods ready
         run: |
           NAMESPACE="sock-shop"
-          kubectl wait --for=condition=Ready pods --all -n $NAMESPACE --timeout=5m
+          kubectl wait --for=condition=Ready pods --all -n $NAMESPACE --timeout=10m
           kubectl get pods -n $NAMESPACE -o wide
