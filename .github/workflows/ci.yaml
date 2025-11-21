@@ -12,42 +12,12 @@ env:
   IMAGE_TAG: ${{ github.sha }}
 
 jobs:
-  discover-services:
-    name: Discover Microservices
-    runs-on: ubuntu-latest
-    outputs:
-      services: ${{ steps.set-services.outputs.services }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Discover services
-        id: set-services
-        run: |
-          services_array=()
-          while IFS= read -r df; do
-            dir=$(dirname "$df")
-            name=$(basename "$dir")
-            # Only include real microservices, skip deploy/kubernetes
-            if [[ "$dir" != "deploy/kubernetes" ]]; then
-              services_array+=("\"${name}::${dir}::Dockerfile\"")
-            fi
-          done < <(git ls-files '**/Dockerfile' || true)
-
-          # convert array to JSON
-          services_json=$(printf "%s," "${services_array[@]}")
-          services_json="[${services_json%,}]"
-
-          echo "services=$services_json" >> $GITHUB_OUTPUT
-          echo "Discovered services JSON: $services_json"
-
   build:
     name: Build & Push Microservices
-    needs: discover-services
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        service: ${{ fromJSON(needs.discover-services.outputs.services) }}
+        service: [ "graphs::graphs::Dockerfile", "healthcheck::healthcheck::Dockerfile", "openapi::openapi::Dockerfile" ]
       max-parallel: 3
     steps:
       - name: Checkout repository
@@ -70,25 +40,24 @@ jobs:
           IFS='::' read -r name context dockerfile <<< "${{ matrix.service }}"
           echo "Service: $name, context: $context, dockerfile: $dockerfile"
 
-          image="${DOCKER_REGISTRY}/${DOCKER_NAMESPACE}/${name}:${IMAGE_TAG}"
-          image_latest="${DOCKER_REGISTRY}/${DOCKER_NAMESPACE}/${name}:latest"
+          IMAGE="${DOCKER_REGISTRY}/${DOCKER_NAMESPACE}/${name}:${IMAGE_TAG}"
+          IMAGE_LATEST="${DOCKER_REGISTRY}/${DOCKER_NAMESPACE}/${name}:latest"
 
-          # Use absolute paths for build context and Dockerfile
           CONTEXT_PATH="${GITHUB_WORKSPACE}/${context}"
           DOCKERFILE_PATH="${CONTEXT_PATH}/${dockerfile}"
 
-          echo "==== Building ${image} ===="
+          echo "==== Building ${IMAGE} ===="
           docker buildx build \
             --platform linux/amd64 \
-            -t "${image}" \
-            -t "${image_latest}" \
+            -t "${IMAGE}" \
+            -t "${IMAGE_LATEST}" \
             -f "${DOCKERFILE_PATH}" \
             "${CONTEXT_PATH}" \
             --push \
             --load
         shell: bash
 
-  deploy-test-kind:
+  deploy-kind:
     name: Deploy & Test on KinD
     needs: build
     runs-on: ubuntu-latest
