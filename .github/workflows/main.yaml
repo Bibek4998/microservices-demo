@@ -8,7 +8,6 @@ on:
 
 env:
   DOCKER_REGISTRY: docker.io
-  DOCKER_NAMESPACE: ${{ secrets.DOCKER_USERNAME }}
   IMAGE_TAG: ${{ github.sha }}
 
 jobs:
@@ -34,7 +33,6 @@ jobs:
         uses: docker/setup-buildx-action@v2
 
       - name: Login to Docker Hub
-        if: ${{ secrets.DOCKER_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' }}
         uses: docker/login-action@v2
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
@@ -44,13 +42,15 @@ jobs:
         run: |
           IFS=':' read -r name context dockerfile <<< "${{ matrix.service }}"
           echo "Service: $name, context: $context, dockerfile: $dockerfile"
-
+          
+          # Use secrets directly in the run context
+          DOCKER_NAMESPACE="${{ secrets.DOCKER_USERNAME }}"
           IMAGE="${DOCKER_REGISTRY}/${DOCKER_NAMESPACE}/${name}:${IMAGE_TAG}"
           IMAGE_LATEST="${DOCKER_REGISTRY}/${DOCKER_NAMESPACE}/${name}:latest"
-
+          
           CONTEXT_PATH="${GITHUB_WORKSPACE}/${context}"
           DOCKERFILE_PATH="${CONTEXT_PATH}/${dockerfile}"
-
+          
           echo "==== Building ${IMAGE} ===="
           docker buildx build \
             --platform linux/amd64 \
@@ -63,7 +63,6 @@ jobs:
 
   deploy-minikube:
     name: Deploy & Test Sock Shop on Minikube
-    needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
