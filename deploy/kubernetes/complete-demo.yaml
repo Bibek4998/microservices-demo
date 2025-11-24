@@ -95,6 +95,13 @@ spec:
         ports:
         - name: mongo
           containerPort: 27017
+        resources:
+          limits:
+            cpu: 200m
+            memory: 256Mi
+          requests:
+            cpu: 100m
+            memory: 128Mi
         securityContext:
           capabilities:
             drop:
@@ -227,6 +234,13 @@ spec:
             value: fake_password
           - name: MYSQL_DATABASE
             value: socksdb
+        resources:
+          limits:
+            cpu: 200m
+            memory: 256Mi
+          requests:
+            cpu: 100m
+            memory: 128Mi
         ports:
         - name: mysql
           containerPort: 3306
@@ -269,10 +283,10 @@ spec:
         resources:
           limits:
             cpu: 300m
-            memory: 1000Mi
+            memory: 400Mi
           requests:
             cpu: 100m
-            memory: 300Mi
+            memory: 200Mi
         ports:
         - containerPort: 8079
         env:
@@ -409,6 +423,13 @@ spec:
         ports:
         - name: mongo
           containerPort: 27017
+        resources:
+          limits:
+            cpu: 200m
+            memory: 256Mi
+          requests:
+            cpu: 100m
+            memory: 128Mi
         securityContext:
           capabilities:
             drop:
@@ -658,6 +679,13 @@ spec:
         ports:
         - name: redis
           containerPort: 6379
+        resources:
+          limits:
+            cpu: 100m
+            memory: 128Mi
+          requests:
+            cpu: 50m
+            memory: 64Mi
         securityContext:
           capabilities:
             drop:
@@ -850,7 +878,13 @@ spec:
       containers:
       - name: user-db
         image: weaveworksdemos/user-db:0.3.0
-
+        resources:
+          limits:
+            cpu: 200m
+            memory: 256Mi
+          requests:
+            cpu: 100m
+            memory: 128Mi
         ports:
         - name: mongo
           containerPort: 27017
@@ -887,4 +921,3 @@ spec:
     targetPort: 27017
   selector:
     name: user-db
-
