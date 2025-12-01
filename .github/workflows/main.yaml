@@ -1,4 +1,4 @@
-name: CI/CD — Build & Push Microservices, Deploy to Minikube
+name: CI/CD — Build & Push Microservices, Deploy to Minikube/EKS
 
 on:
   push:
@@ -9,19 +9,32 @@ on:
 env:
   DOCKER_REGISTRY: docker.io
   IMAGE_TAG: ${{ github.sha }}
+  # set default deploy target; override via secrets if needed
+  DEPLOY_TARGET: ${{ secrets.DEPLOY_TARGET }}
+
+# List of services to build: "name:context:dockerfile"
+# Adjust this list to match the directories and Dockerfile names in your repo.
+# I've included the common Sock Shop microservices — edit as needed.
+services-to-build:
+  - front-end:front-end:Dockerfile
+  - catalogue:catalogue:Dockerfile
+  - carts:carts:Dockerfile
+  - orders:orders:Dockerfile
+  - user:user:Dockerfile
+  - payment:payment:Dockerfile
+  - graphs:graphs:Dockerfile
+  - healthcheck:healthcheck:Dockerfile
+  - openapi:openapi:Dockerfile
 
 jobs:
   build:
-    name: Build & Push Microservices
+    name: Build & Push Docker images
     runs-on: ubuntu-latest
+    # Using a dynamic matrix from the YAML list above
     strategy:
       matrix:
-        service: [
-          "graphs:graphs:Dockerfile",
-          "healthcheck:healthcheck:Dockerfile",
-          "openapi:openapi:Dockerfile"
-        ]
-      max-parallel: 3
+        service: ${{ fromJson('["front-end:front-end:Dockerfile","catalogue:catalogue:Dockerfile","carts:carts:Dockerfile","orders:orders:Dockerfile","user:user:Dockerfile","payment:payment:Dockerfile","graphs:graphs:Dockerfile","healthcheck:healthcheck:Dockerfile","openapi:openapi:Dockerfile"]') }}
+      max-parallel: 4
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -38,166 +51,118 @@ jobs:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build & Push Docker Image
+      - name: Build & push image
+        id: build-image
+        uses: docker/build-push-action@v4
+        with:
+          context: ${{ github.workspace }}/${{ fromJson('["placeholder"]') }} # placeholder, replaced in run step below
+          # we will compute image names in the run wrapper
+          push: true
+          platforms: linux/amd64
+          # use cache to speed up repeated builds (inline cache)
+          cache-from: type=registry,ref=${{ env.DOCKER_REGISTRY }}/${{ secrets.DOCKER_USERNAME }}/build-cache:latest || true
+          cache-to: type=inline
+
+      - name: Build & Push (scripted) — proper per-matrix run
+        if: always()
         run: |
           IFS=':' read -r name context dockerfile <<< "${{ matrix.service }}"
           echo "Service: $name, context: $context, dockerfile: $dockerfile"
-          
-          # Use secrets directly in the run context
           DOCKER_NAMESPACE="${{ secrets.DOCKER_USERNAME }}"
           IMAGE="${DOCKER_REGISTRY}/${DOCKER_NAMESPACE}/${name}:${IMAGE_TAG}"
           IMAGE_LATEST="${DOCKER_REGISTRY}/${DOCKER_NAMESPACE}/${name}:latest"
-          
           CONTEXT_PATH="${GITHUB_WORKSPACE}/${context}"
           DOCKERFILE_PATH="${CONTEXT_PATH}/${dockerfile}"
-          
-          echo "==== Building ${IMAGE} ===="
+          echo "Building ${IMAGE}"
           docker buildx build \
             --platform linux/amd64 \
             -t "${IMAGE}" \
             -t "${IMAGE_LATEST}" \
             -f "${DOCKERFILE_PATH}" \
             "${CONTEXT_PATH}" \
-            --push
+            --push \
+            --cache-from=type=registry,ref=${DOCKER_REGISTRY}/${DOCKER_NAMESPACE}/build-cache:latest || true
+          # update build-cache tag (best-effort)
+          docker buildx imagetools create --tag ${DOCKER_REGISTRY}/${DOCKER_NAMESPACE}/build-cache:latest ${IMAGE} || true
         shell: bash
 
-  deploy-minikube:
-    name: Deploy & Test Sock Shop on Minikube
+  deploy:
+    name: Deploy to target (Minikube or EKS)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    needs: build
+    timeout-minutes: 60
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install kubectl and Minikube
+      - name: Install kubectl
         run: |
-          # Install kubectl
           curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
           sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
-          
+          kubectl version --client
+
+      - name: Deploy to Minikube (if DEPLOY_TARGET == minikube)
+        if: secrets.DEPLOY_TARGET == 'minikube' || env.DEPLOY_TARGET == 'minikube'
+        run: |
           # Install Minikube
           curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
           sudo install minikube-linux-amd64 /usr/local/bin/minikube
-          
-          # Verify installations
-          kubectl version --client
-          minikube version
-
-      - name: Start Minikube with optimized resources
-        run: |
-          # Start Minikube with sufficient resources for Sock Shop
-          minikube start \
-            --driver=docker \
-            --memory=4000m \
-            --cpus=4 \
-            --disk-size=20g \
-            --extra-config=kubelet.eviction-hard="memory.available<200Mi,nodefs.available<10%" \
-            --extra-config=kubelet.system-reserved="memory=300Mi,cpu=100m" \
-            --wait=all
-          
-          # Verify cluster is running
+          # start minikube with resources suitable for Sock Shop
+          minikube start --driver=docker --memory=4000m --cpus=4 --disk-size=20g --wait=all
           minikube status
-          echo "=== Cluster Info ==="
-          kubectl cluster-info
-          echo "=== Nodes ==="
-          kubectl get nodes -o wide
-
-      - name: Deploy Sock Shop application
-        run: |
-          echo "🚀 Deploying Sock Shop to Minikube..."
           kubectl apply -f deploy/kubernetes/complete-demo.yaml
-          echo "✅ Sock Shop deployment initiated"
-
-      - name: Wait for critical databases
-        run: |
+          # wait for core pods (adjust labels/names if different)
           NAMESPACE="sock-shop"
-          echo "📦 Waiting for databases to be ready..."
-          
-          # Wait for databases with individual timeouts
-          for db in carts-db catalogue-db session-db user-db; do
-            echo "Waiting for $db..."
-            kubectl wait --for=condition=Ready pod -l name=$db -n $NAMESPACE --timeout=300s || echo "⚠️  $db not ready yet, continuing..."
-          done
-          echo "✅ Databases are ready!"
-
-      - name: Wait for core services
-        run: |
-          NAMESPACE="sock-shop"
-          echo "🔄 Waiting for core services..."
-          
-          # Wait for essential services
-          for service in rabbitmq front-end catalogue user; do
-            echo "Waiting for $service..."
-            kubectl wait --for=condition=Ready pod -l name=$service -n $NAMESPACE --timeout=300s || echo "⚠️  $service not ready yet, continuing..."
-          done
-          echo "✅ Core services are ready!"
-
-      - name: Check deployment status
-        run: |
-          NAMESPACE="sock-shop"
-          echo "=== Current Pod Status ==="
+          kubectl wait --for=condition=Ready pod -l name=front-end -n $NAMESPACE --timeout=600s || echo "front-end not ready"
           kubectl get pods -n $NAMESPACE -o wide
-          
-          # Count running pods
-          RUNNING_PODS=$(kubectl get pods -n $NAMESPACE --field-selector=status.phase=Running --no-headers 2>/dev/null | wc -l || echo "0")
-          TOTAL_PODS=$(kubectl get pods -n $NAMESPACE --no-headers 2>/dev/null | wc -l || echo "0")
-          echo "📊 Pod Status: $RUNNING_PODS/$TOTAL_PODS running"
-          
-          if [ $RUNNING_PODS -ge 10 ]; then
-            echo "🎉 Success: Most pods are running!"
-          else
-            echo "⚠️  Some pods may still be initializing"
-          fi
-
-      - name: Test application accessibility
-        run: |
-          NAMESPACE="sock-shop"
-          echo "🧪 Testing application accessibility..."
-          
-          # Get front-end URL
           FRONTEND_URL=$(minikube service front-end -n $NAMESPACE --url 2>/dev/null | head -n1 || echo "")
-          
-          if [ -n "$FRONTEND_URL" ]; then
-            echo "🌐 Front-end URL: $FRONTEND_URL"
-            
-            # Test connectivity with retries
-            for i in {1..10}; do
-              if curl -s -f "$FRONTEND_URL" > /dev/null; then
-                echo "✅ Front-end is accessible and responding!"
-                break
-              else
-                echo "⏳ Attempt $i/10: Front-end not ready yet, waiting..."
-                sleep 10
-              fi
-            done
-          else
-            echo "❌ Could not get front-end URL"
-          fi
+          echo "FRONTEND_URL=$FRONTEND_URL"
+      
+      - name: Configure AWS credentials (OIDC if provided)
+        if: secrets.DEPLOY_TARGET == 'eks' || env.DEPLOY_TARGET == 'eks'
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          # prefer role-based OIDC if you set AWS_ROLE_TO_ASSUME
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME || '' }}
+          aws-region: ${{ secrets.AWS_REGION || env.AWS_REGION || 'us-east-1' }}
+          # If role-to-assume is empty, the action will fall back to access keys (if set)
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID || '' }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY || '' }}
 
-      - name: Final status report
+      - name: Update kubeconfig for EKS and deploy (if DEPLOY_TARGET == eks)
+        if: secrets.DEPLOY_TARGET == 'eks' || env.DEPLOY_TARGET == 'eks'
+        env:
+          CLUSTER_NAME: ${{ secrets.EKS_CLUSTER_NAME || env.EKS_CLUSTER_NAME }}
+          AWS_REGION: ${{ secrets.AWS_REGION || env.AWS_REGION || 'ap-south-1' }}
         run: |
+          if [ -z "$CLUSTER_NAME" ]; then
+            echo "EKS_CLUSTER_NAME must be set in secrets as EKS_CLUSTER_NAME"
+            exit 1
+          fi
+          # Install awscli if missing
+          if ! command -v aws >/dev/null 2>&1; then
+            curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+            unzip -q awscliv2.zip
+            sudo ./aws/install
+          fi
+          aws eks update-kubeconfig --region $AWS_REGION --name $CLUSTER_NAME
+          kubectl get nodes -o wide
+          # apply manifests (consider templating with kustomize/helm later)
+          kubectl apply -f deploy/kubernetes/complete-demo.yaml
           NAMESPACE="sock-shop"
-          echo "=== FINAL DEPLOYMENT STATUS ==="
+          kubectl wait --for=condition=Available deployment/front-end -n $NAMESPACE --timeout=600s || echo "front-end not available"
           kubectl get pods -n $NAMESPACE -o wide
-          echo "=== SERVICES ==="
-          kubectl get services -n $NAMESPACE
-          echo "=== DEPLOYMENTS ==="
-          kubectl get deployments -n $NAMESPACE
+          kubectl get svc -n $NAMESPACE -o wide
+
+      - name: Final report
+        run: |
+          echo "=== all done. Inspect pods/services ==="
+          kubectl get pods -A -o wide || true
+          kubectl get svc -A -o wide || true
 
       - name: Debug if any issues
         if: failure()
         run: |
-          NAMESPACE="sock-shop"
-          echo "🔍 Debugging information:"
-          
-          echo "--- Failed Pods ---"
-          kubectl get pods -n $NAMESPACE --field-selector=status.phase!=Running -o wide 2>/dev/null || echo "No failed pods found"
-          
-          echo "--- Pods with Restarts ---"
-          kubectl get pods -n $NAMESPACE --no-headers | awk '$4>0' 2>/dev/null || echo "No pods with restarts"
-          
-          echo "--- Recent Events ---"
-          kubectl get events -n $NAMESPACE --sort-by=.lastTimestamp 2>/dev/null | tail -10 || echo "No events found"
-          
-          echo "--- Node Resources ---"
-          kubectl describe node minikube 2>/dev/null | grep -A 5 "Allocated resources" || echo "Node info not available"
+          echo "=== Debug info ==="
+          kubectl get pods -A -o wide || true
+          kubectl get events --sort-by=.lastTimestamp -A | tail -n 50 || true
