@@ -1,36 +1,21 @@
-name: CI/CD — Build & Push Microservices, Deploy to Minikube
+name: CI/CD — Build, Push & Deploy to EC2
 
 on:
   push:
-    branches: [ main, develop ]
-  pull_request:
-    branches: [ main, develop ]
+    branches: [ main ]
 
 env:
   DOCKER_REGISTRY: docker.io
-  IMAGE_TAG: ${{ github.sha }}
+  IMAGE_TAG: latest
 
 jobs:
   build:
-    name: Build & Push Microservices
+    name: Build & Push Images
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        service: [
-          "graphs:graphs:Dockerfile",
-          "healthcheck:healthcheck:Dockerfile",
-          "openapi:openapi:Dockerfile"
-        ]
-      max-parallel: 3
+
     steps:
-      - name: Checkout repository
+      - name: Checkout code
         uses: actions/checkout@v4
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v2
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
 
       - name: Login to Docker Hub
         uses: docker/login-action@v2
@@ -38,166 +23,30 @@ jobs:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build & Push Docker Image
+      - name: Build & Push Images
         run: |
-          IFS=':' read -r name context dockerfile <<< "${{ matrix.service }}"
-          echo "Service: $name, context: $context, dockerfile: $dockerfile"
-          
-          # Use secrets directly in the run context
-          DOCKER_NAMESPACE="${{ secrets.DOCKER_USERNAME }}"
-          IMAGE="${DOCKER_REGISTRY}/${DOCKER_NAMESPACE}/${name}:${IMAGE_TAG}"
-          IMAGE_LATEST="${DOCKER_REGISTRY}/${DOCKER_NAMESPACE}/${name}:latest"
-          
-          CONTEXT_PATH="${GITHUB_WORKSPACE}/${context}"
-          DOCKERFILE_PATH="${CONTEXT_PATH}/${dockerfile}"
-          
-          echo "==== Building ${IMAGE} ===="
-          docker buildx build \
-            --platform linux/amd64 \
-            -t "${IMAGE}" \
-            -t "${IMAGE_LATEST}" \
-            -f "${DOCKERFILE_PATH}" \
-            "${CONTEXT_PATH}" \
-            --push
-        shell: bash
+          docker build -t ${{ secrets.DOCKER_USERNAME }}/front-end:latest front-end
+          docker build -t ${{ secrets.DOCKER_USERNAME }}/catalogue:latest catalogue
+          docker build -t ${{ secrets.DOCKER_USERNAME }}/catalogue-db:latest catalogue-db
 
-  deploy-minikube:
-    name: Deploy & Test Sock Shop on Minikube
+          docker push ${{ secrets.DOCKER_USERNAME }}/front-end:latest
+          docker push ${{ secrets.DOCKER_USERNAME }}/catalogue:latest
+          docker push ${{ secrets.DOCKER_USERNAME }}/catalogue-db:latest
+
+  deploy:
+    name: Deploy to AWS EC2
+    needs: build
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Install kubectl and Minikube
-        run: |
-          # Install kubectl
-          curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-          sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
-          
-          # Install Minikube
-          curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
-          sudo install minikube-linux-amd64 /usr/local/bin/minikube
-          
-          # Verify installations
-          kubectl version --client
-          minikube version
-
-      - name: Start Minikube with optimized resources
-        run: |
-          # Start Minikube with sufficient resources for Sock Shop
-          minikube start \
-            --driver=docker \
-            --memory=4000m \
-            --cpus=4 \
-            --disk-size=20g \
-            --extra-config=kubelet.eviction-hard="memory.available<200Mi,nodefs.available<10%" \
-            --extra-config=kubelet.system-reserved="memory=300Mi,cpu=100m" \
-            --wait=all
-          
-          # Verify cluster is running
-          minikube status
-          echo "=== Cluster Info ==="
-          kubectl cluster-info
-          echo "=== Nodes ==="
-          kubectl get nodes -o wide
-
-      - name: Deploy Sock Shop application
-        run: |
-          echo "🚀 Deploying Sock Shop to Minikube..."
-          kubectl apply -f deploy/kubernetes/complete-demo.yaml
-          echo "✅ Sock Shop deployment initiated"
-
-      - name: Wait for critical databases
-        run: |
-          NAMESPACE="sock-shop"
-          echo "📦 Waiting for databases to be ready..."
-          
-          # Wait for databases with individual timeouts
-          for db in carts-db catalogue-db session-db user-db; do
-            echo "Waiting for $db..."
-            kubectl wait --for=condition=Ready pod -l name=$db -n $NAMESPACE --timeout=300s || echo "⚠️  $db not ready yet, continuing..."
-          done
-          echo "✅ Databases are ready!"
-
-      - name: Wait for core services
-        run: |
-          NAMESPACE="sock-shop"
-          echo "🔄 Waiting for core services..."
-          
-          # Wait for essential services
-          for service in rabbitmq front-end catalogue user; do
-            echo "Waiting for $service..."
-            kubectl wait --for=condition=Ready pod -l name=$service -n $NAMESPACE --timeout=300s || echo "⚠️  $service not ready yet, continuing..."
-          done
-          echo "✅ Core services are ready!"
-
-      - name: Check deployment status
-        run: |
-          NAMESPACE="sock-shop"
-          echo "=== Current Pod Status ==="
-          kubectl get pods -n $NAMESPACE -o wide
-          
-          # Count running pods
-          RUNNING_PODS=$(kubectl get pods -n $NAMESPACE --field-selector=status.phase=Running --no-headers 2>/dev/null | wc -l || echo "0")
-          TOTAL_PODS=$(kubectl get pods -n $NAMESPACE --no-headers 2>/dev/null | wc -l || echo "0")
-          echo "📊 Pod Status: $RUNNING_PODS/$TOTAL_PODS running"
-          
-          if [ $RUNNING_PODS -ge 10 ]; then
-            echo "🎉 Success: Most pods are running!"
-          else
-            echo "⚠️  Some pods may still be initializing"
-          fi
-
-      - name: Test application accessibility
-        run: |
-          NAMESPACE="sock-shop"
-          echo "🧪 Testing application accessibility..."
-          
-          # Get front-end URL
-          FRONTEND_URL=$(minikube service front-end -n $NAMESPACE --url 2>/dev/null | head -n1 || echo "")
-          
-          if [ -n "$FRONTEND_URL" ]; then
-            echo "🌐 Front-end URL: $FRONTEND_URL"
-            
-            # Test connectivity with retries
-            for i in {1..10}; do
-              if curl -s -f "$FRONTEND_URL" > /dev/null; then
-                echo "✅ Front-end is accessible and responding!"
-                break
-              else
-                echo "⏳ Attempt $i/10: Front-end not ready yet, waiting..."
-                sleep 10
-              fi
-            done
-          else
-            echo "❌ Could not get front-end URL"
-          fi
-
-      - name: Final status report
-        run: |
-          NAMESPACE="sock-shop"
-          echo "=== FINAL DEPLOYMENT STATUS ==="
-          kubectl get pods -n $NAMESPACE -o wide
-          echo "=== SERVICES ==="
-          kubectl get services -n $NAMESPACE
-          echo "=== DEPLOYMENTS ==="
-          kubectl get deployments -n $NAMESPACE
-
-      - name: Debug if any issues
-        if: failure()
-        run: |
-          NAMESPACE="sock-shop"
-          echo "🔍 Debugging information:"
-          
-          echo "--- Failed Pods ---"
-          kubectl get pods -n $NAMESPACE --field-selector=status.phase!=Running -o wide 2>/dev/null || echo "No failed pods found"
-          
-          echo "--- Pods with Restarts ---"
-          kubectl get pods -n $NAMESPACE --no-headers | awk '$4>0' 2>/dev/null || echo "No pods with restarts"
-          
-          echo "--- Recent Events ---"
-          kubectl get events -n $NAMESPACE --sort-by=.lastTimestamp 2>/dev/null | tail -10 || echo "No events found"
-          
-          echo "--- Node Resources ---"
-          kubectl describe node minikube 2>/dev/null | grep -A 5 "Allocated resources" || echo "Node info not available"
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            cd ~/microservices-demo/deploy/docker-compose
+            docker compose pull
+            docker compose down
+            docker compose up -d
