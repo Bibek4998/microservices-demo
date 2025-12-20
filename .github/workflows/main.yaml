@@ -23,7 +23,7 @@ jobs:
             # 1. Navigate to project directory
             cd ~/microservices-demo
             
-            # 2. Pull latest code from GitHub (EXACTLY like the MERN example)
+            # 2. Pull latest code from GitHub
             git pull origin main
             
             # 3. Navigate to docker directory
