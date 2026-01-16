@@ -1,0 +1,97 @@
+# Microservices Demo – Deployment on AWS EC2
+
+## 1. Clone the Repository
+
+
+git clone https://github.com/Bibek4998/microservices-demo.git
+cd microservices-demo
+
+
+## 2. Build Docker Images Using Docker Compose
+
+Ensure Docker and Docker Compose are installed on local machine.
+
+docker-compose up -d --build
+
+
+This command will:
+
+* Build Docker images for all microservices
+* Start all containers
+
+Verify
+docker ps
+
+
+## 3. Push Docker Images to Docker Hub
+
+### Login to Docker Hub
+
+docker login
+
+### Tag Docker Images
+
+docker tag frontend bibek49/frontend:latest
+
+### Push Images to Docker Hub
+
+docker push bibek49/frontend:latest
+
+
+Repeat the above steps for all required microservices.
+
+
+## 4. Create an AWS EC2 Instance
+
+* Launch an EC2 instance (Ubuntu 20.04 or Amazon Linux 2)
+* Instance type: t2.micro
+* Configure Security Group:
+
+  * Port 22 (SSH)
+  * Port 80
+* Download the key pair (.pem file)
+
+
+## 5. Connect to the EC2 Instance
+
+ssh EC2 instance
+
+
+## 6. Install Docker and Docker Compose on EC2
+
+### Install Docker
+
+sudo apt update -y
+sudo apt install docker.io -y
+sudo systemctl start docker
+sudo systemctl enable docker
+sudo usermod -aG docker $USER
+logout
+
+Login again after logout.
+
+### Install Docker Compose
+
+sudo curl -L "https://github.com/docker/compose/releases/download/v2.25.0/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+sudo chmod +x /usr/local/bin/docker-compose
+docker-compose --version
+
+
+## 7. Pull Docker Images on EC2
+
+docker pull bibek49/frontend:latest
+
+## 8. Run Containers on EC2
+
+### Using Docker Compose
+
+Copy the `docker-compose.yml` file to the EC2 instance and run:
+
+docker-compose up -d
+
+
+## 9. Access the Application
+
+Open a web browser and access:
+
+http://<EC2_PUBLIC_IP>
